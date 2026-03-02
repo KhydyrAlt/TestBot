@@ -825,15 +825,40 @@ async def process_edit_workplace(message: types.Message, state: FSMContext):
 # ===== ОБРАБОТЧИК СОЗДАНИЯ ЗАЯВКИ =====
 @dp.message(Form.problem)
 async def process_problem(message: types.Message, state: FSMContext):
-    # Проверяем, нет ли уже активной заявки (дополнительная защита)
+    # Проверяем, нет ли уже активной заявки
     if Database.has_active_ticket(message.from_user.id):
-        await message.answer(
-            "❌ **Нельзя создать новую заявку!**\n\n"
-            "У вас уже есть активная заявка. Дождитесь её решения.",
-            parse_mode="HTML"
-        )
-        await show_main_menu(message, state)
+        tickets = Database.get_user_tickets(message.from_user.id, limit=1)
+        if tickets:
+            await message.answer(
+                f"❌ **Нельзя создать новую заявку!**\n\n"
+                f"У вас уже есть активная заявка #{tickets[0][0]}",
+                parse_mode="HTML",
+                reply_markup=get_main_menu_keyboard(True)
+            )
         return
+    
+    # ===== ИСПРАВЛЕНИЕ ОШИБКИ KEYERROR =====
+    # Получаем данные из состояния
+    data = await state.get_data()
+    
+    # Проверяем, есть ли имя и место в состоянии
+    if 'name' not in data or 'workplace' not in data:
+        # Пробуем восстановить из базы данных
+        user = Database.get_user(message.from_user.id)
+        if user:
+            name, workplace, _ = user
+            # Восстанавливаем данные в состоянии
+            await state.update_data(name=name, workplace=workplace)
+            data = await state.get_data()  # Обновляем data
+            logger.info(f"🔄 Восстановлены данные для {message.from_user.id} из БД")
+        else:
+            # Если и в базе нет - отправляем на регистрацию
+            await message.answer(
+                "❌ Данные не найдены. Пройдите регистрацию заново.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            await state.set_state(Form.name)
+            return
     
     problem = message.text
     valid_problems = ["1С", "Принтер", "Сильвер", "ВПН", "Проблемы с ПК", 
@@ -846,10 +871,7 @@ async def process_problem(message: types.Message, state: FSMContext):
         )
         return
     
-    data = await state.get_data()
-    Database.update_last_active(message.from_user.id)
-    
-    # Создаём заявку
+    # Создаём заявку (теперь data точно содержит name и workplace)
     ticket_id = Database.create_ticket(
         message.from_user.id,
         data['name'],
@@ -1239,6 +1261,11 @@ async def handle_unknown(message: types.Message, state: FSMContext):
     """Обработчик для любых других сообщений"""
     user_id = message.from_user.id
     current_state = await state.get_state()
+    
+    # Проверка на пустое сообщение
+    if not message.text or message.text.isspace():
+        # Игнорируем пустые сообщения
+        return
     
     # Проверяем пользователя
     user = Database.get_user(user_id)
