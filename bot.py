@@ -28,9 +28,9 @@ if not BOT_TOKEN:
 
 # ===== НАСТРОЙКИ =====
 DB_PATH = "users.db"
-TICKETS_RETENTION_DAYS = 30  # Храним решенные заявки 30 дней
-MAX_TICKETS_PER_USER = 20      # В истории показываем только последние 20
-CLEANUP_INTERVAL_HOURS = 24    # Чистим БД раз в сутки
+TICKETS_RETENTION_DAYS = 30
+MAX_TICKETS_PER_USER = 20
+CLEANUP_INTERVAL_HOURS = 24
 
 # ===== ЛОГИРОВАНИЕ =====
 logging.basicConfig(level=logging.INFO)
@@ -47,10 +47,8 @@ class Database:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        # Включаем режим WAL для лучшей производительности
         cursor.execute("PRAGMA journal_mode=WAL")
         
-        # Таблица пользователей
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -62,7 +60,6 @@ class Database:
             )
         """)
         
-        # Таблица заявок
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS tickets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,7 +76,6 @@ class Database:
             )
         """)
         
-        # Индексы для быстрого поиска
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tickets_user ON tickets(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tickets_created ON tickets(created_at)")
@@ -91,7 +87,6 @@ class Database:
 
     @staticmethod
     def cleanup_old_tickets():
-        """Автоматически удаляет старые решенные заявки"""
         try:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
@@ -298,7 +293,6 @@ class Database:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        # Получаем текущие заметки
         cursor.execute("SELECT admin_notes FROM tickets WHERE id = ?", (ticket_id,))
         current_notes = cursor.fetchone()
         
@@ -322,7 +316,6 @@ class Database:
 
     @staticmethod
     def has_active_ticket(user_id):
-        """Проверяет, есть ли у пользователя активная заявка"""
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("""
@@ -338,21 +331,19 @@ Database.init_db()
 
 # ===== СОСТОЯНИЯ =====
 class Form(StatesGroup):
-    name = State()           # Ввод имени
-    workplace = State()       # Выбор места
-    problem = State()         # Выбор проблемы
-    edit_choice = State()     # Главное меню
-    edit_profile = State()    # Меню редактирования
-    edit_name = State()       # Редактирование имени
-    edit_workplace = State()  # Редактирование места
+    name = State()
+    workplace = State()
+    problem = State()
+    edit_choice = State()
+    edit_profile = State()
+    edit_name = State()
+    edit_workplace = State()
 
 class AdminStates(StatesGroup):
     choosing_action = State()
-    mailing_text = State()     # Состояние для ввода текста рассылки
+    mailing_text = State()
 
 # ===== КЛАВИАТУРЫ =====
-
-# 👑 АДМИН-КЛАВИАТУРА
 def get_admin_main_keyboard():
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
@@ -363,16 +354,12 @@ def get_admin_main_keyboard():
              KeyboardButton(text="👥 Сотрудники")],
             [KeyboardButton(text="🧹 Очистить старые заявки")]
         ],
-        resize_keyboard=True,
-        input_field_placeholder="👑 Меню админа"
+        resize_keyboard=True
     )
     return keyboard
 
-# 👤 КЛАВИАТУРА ДЛЯ ПОЛЬЗОВАТЕЛЕЙ
 def get_main_menu_keyboard(has_active=False):
-    """Возвращает клавиатуру главного меню"""
     if has_active:
-        # Если есть активная заявка - без кнопки "Новая заявка"
         keyboard = ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="📋 Мои заявки")],
@@ -381,7 +368,6 @@ def get_main_menu_keyboard(has_active=False):
             resize_keyboard=True
         )
     else:
-        # Если нет активной заявки - полное меню
         keyboard = ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="📝 Новая заявка")],
@@ -412,8 +398,7 @@ def get_workplace_keyboard():
             [KeyboardButton(text="Логистика"), KeyboardButton(text="Салон б/у")],
             [KeyboardButton(text="Сервис"), KeyboardButton(text="Склад")]
         ],
-        resize_keyboard=True,
-        input_field_placeholder="Выберите рабочее место"
+        resize_keyboard=True
     )
     return keyboard
 
@@ -423,10 +408,10 @@ def get_problem_keyboard():
             [KeyboardButton(text="1С"), KeyboardButton(text="Принтер")],
             [KeyboardButton(text="Сильвер"), KeyboardButton(text="ВПН")],
             [KeyboardButton(text="Проблемы с ПК"), KeyboardButton(text="Картридж")],
-            [KeyboardButton(text="Камеры"), KeyboardButton(text="ПАМАГИТИ")]
+            [KeyboardButton(text="Камеры"), KeyboardButton(text="ПАМАГИТИ")],
+            [KeyboardButton(text="◀️ Отмена")]  # Кнопка возврата
         ],
-        resize_keyboard=True,
-        input_field_placeholder="Выберите проблему"
+        resize_keyboard=True
     )
     return keyboard
 
@@ -442,9 +427,25 @@ def get_ticket_action_keyboard(ticket_id):
     )
     return keyboard
 
+# ===== ФУНКЦИЯ ДЛЯ КОНВЕРТАЦИИ ВРЕМЕНИ (МОСКВА UTC+3) =====
+def to_moscow_time(db_time):
+    """Конвертирует UTC время из БД в московское (UTC+3)"""
+    if not db_time:
+        return None
+    try:
+        if isinstance(db_time, str):
+            dt = datetime.strptime(db_time, '%Y-%m-%d %H:%M:%S')
+        else:
+            dt = db_time
+        # Добавляем 3 часа (Москва)
+        moscow_time = dt + timedelta(hours=3)
+        return moscow_time.strftime('%d.%m.%Y %H:%M')
+    except Exception as e:
+        logger.error(f"Ошибка конвертации времени: {e}")
+        return str(db_time)
+
 # ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
 async def show_main_menu(message: types.Message, state: FSMContext, user_data=None):
-    """Показывает главное меню для пользователя с проверкой активных заявок"""
     if user_data and len(user_data) >= 2:
         name, workplace, _ = user_data
     else:
@@ -452,10 +453,8 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_data=No
         name = data.get('name', 'Пользователь')
         workplace = data.get('workplace', 'не указано')
     
-    # Проверяем, есть ли активная заявка
     has_active = Database.has_active_ticket(message.from_user.id)
     
-    # Формируем сообщение с предупреждением если есть активная заявка
     if has_active:
         active_warning = "\n\n⚠️ **У вас есть активная заявка! Новая заявка будет доступна после её решения.**"
     else:
@@ -473,7 +472,6 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_data=No
     )
 
 async def show_admin_panel(message: types.Message, state: FSMContext):
-    """Показывает админ-панель"""
     await state.set_state(AdminStates.choosing_action)
     
     stats = Database.get_stats()
@@ -491,7 +489,6 @@ async def show_admin_panel(message: types.Message, state: FSMContext):
     )
 
 async def start_registration(message: types.Message, state: FSMContext):
-    """Начинает регистрацию нового пользователя"""
     await state.set_state(Form.name)
     await message.answer(
         "👋 Привет! Я бот для вызова сисадмина.\n"
@@ -501,7 +498,6 @@ async def start_registration(message: types.Message, state: FSMContext):
     )
 
 def get_status_emoji(status):
-    """Возвращает эмодзи для статуса заявки"""
     status_emojis = {
         'new': '🆕',
         'accepted': '🔄',
@@ -510,7 +506,6 @@ def get_status_emoji(status):
     return status_emojis.get(status, '❓')
 
 def format_ticket_info(ticket):
-    """Форматирует информацию о заявке с защитой от ошибок"""
     try:
         ticket_id, user_id, user_name, workplace, problem, status, created_at, accepted_at, resolved_at, admin_notes = ticket
         
@@ -521,14 +516,7 @@ def format_ticket_info(ticket):
             'resolved': 'Решена'
         }.get(status, status)
         
-        # Безопасное преобразование даты
-        if isinstance(created_at, str):
-            try:
-                created_time = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
-            except:
-                created_time = created_at
-        else:
-            created_time = created_at.strftime('%d.%m.%Y %H:%M') if hasattr(created_at, 'strftime') else str(created_at)
+        created_time = to_moscow_time(created_at) or str(created_at)
         
         info = (
             f"{status_emoji} {hbold(f'Заявка #{ticket_id}')}\n"
@@ -539,23 +527,11 @@ def format_ticket_info(ticket):
         )
         
         if accepted_at:
-            if isinstance(accepted_at, str):
-                try:
-                    accepted_time = datetime.strptime(accepted_at, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
-                except:
-                    accepted_time = accepted_at
-            else:
-                accepted_time = accepted_at.strftime('%d.%m.%Y %H:%M') if hasattr(accepted_at, 'strftime') else str(accepted_at)
+            accepted_time = to_moscow_time(accepted_at)
             info += f"\n✅ Принята: {accepted_time}"
         
         if resolved_at:
-            if isinstance(resolved_at, str):
-                try:
-                    resolved_time = datetime.strptime(resolved_at, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
-                except:
-                    resolved_time = resolved_at
-            else:
-                resolved_time = resolved_at.strftime('%d.%m.%Y %H:%M') if hasattr(resolved_at, 'strftime') else str(resolved_at)
+            resolved_time = to_moscow_time(resolved_at)
             info += f"\n🎉 Решена: {resolved_time}"
         
         if admin_notes:
@@ -568,7 +544,6 @@ def format_ticket_info(ticket):
 
 # Фоновые задачи
 async def periodic_cleanup():
-    """Периодическая очистка БД"""
     while True:
         await asyncio.sleep(CLEANUP_INTERVAL_HOURS * 3600)
         deleted = Database.cleanup_old_tickets()
@@ -602,10 +577,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
     
     if current_state:
-        # Сохраняем данные перед очисткой
         data = await state.get_data()
         await state.clear()
-        # Восстанавливаем данные, если они были
         if data:
             await state.update_data(data)
     
@@ -651,8 +624,6 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
             )
 
 # ===== ОБРАБОТЧИКИ РЕГИСТРАЦИИ =====
-
-# 1. ПОЛЬЗОВАТЕЛЬ ВВОДИТ ИМЯ
 @dp.message(Form.name)
 async def process_name(message: types.Message, state: FSMContext):
     name = message.text.strip()
@@ -660,7 +631,6 @@ async def process_name(message: types.Message, state: FSMContext):
         await message.answer("❌ Имя должно быть от 2 до 50 символов. Попробуйте еще раз:")
         return
     
-    # Сохраняем имя
     await state.update_data(name=name)
     await state.set_state(Form.workplace)
     
@@ -671,7 +641,6 @@ async def process_name(message: types.Message, state: FSMContext):
         parse_mode="HTML"
     )
 
-# 2. ПОЛЬЗОВАТЕЛЬ ВЫБИРАЕТ МЕСТО
 @dp.message(Form.workplace)
 async def process_workplace(message: types.Message, state: FSMContext):
     workplace = message.text
@@ -685,17 +654,12 @@ async def process_workplace(message: types.Message, state: FSMContext):
         )
         return
     
-    # Получаем имя из состояния
     data = await state.get_data()
     name = data.get('name')
     
-    # Сохраняем в базу
     Database.save_user(message.from_user.id, name, workplace)
-    
-    # Обновляем данные в состоянии
     await state.update_data(workplace=workplace)
     
-    # Поздравляем с регистрацией
     await message.answer(
         f"✅ {hbold('Регистрация завершена!')}\n\n"
         f"👤 Имя: {hbold(name)}\n"
@@ -705,7 +669,6 @@ async def process_workplace(message: types.Message, state: FSMContext):
         parse_mode="HTML"
     )
     
-    # Показываем главное меню
     if message.from_user.id == ADMIN_ID:
         await show_admin_panel(message, state)
     else:
@@ -716,13 +679,10 @@ async def process_workplace(message: types.Message, state: FSMContext):
 async def process_main_menu(message: types.Message, state: FSMContext):
     data = await state.get_data()
     
-    # Проверяем активную заявку
     has_active = Database.has_active_ticket(message.from_user.id)
     
     if message.text == "📝 Новая заявка":
-        # Дополнительная проверка безопасности
         if has_active:
-            # Получаем активную заявку
             tickets = Database.get_user_tickets(message.from_user.id, limit=1)
             if tickets:
                 await message.answer(
@@ -734,13 +694,13 @@ async def process_main_menu(message: types.Message, state: FSMContext):
                 )
             return
         
-        await state.set_state(Form.problem)
         await message.answer(
             f"👤 {hbold(data['name'])} | 📍 {hbold(data['workplace'])}\n\n"
             f"❓ Выберите проблему:",
             reply_markup=get_problem_keyboard(),
             parse_mode="HTML"
         )
+        await state.set_state(Form.problem)
     
     elif message.text == "📋 Мои заявки":
         tickets = Database.get_user_tickets(message.from_user.id)
@@ -763,13 +723,7 @@ async def process_main_menu(message: types.Message, state: FSMContext):
                 'resolved': '✅ Решена'
             }.get(status, status)
             
-            if isinstance(created_at, str):
-                try:
-                    created_time = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
-                except:
-                    created_time = created_at
-            else:
-                created_time = created_at.strftime('%d.%m.%Y %H:%M') if hasattr(created_at, 'strftime') else str(created_at)
+            created_time = to_moscow_time(created_at) or str(created_at)
             
             text += f"{status_emoji} {hbold(f'#{ticket_id}')} | {problem}\n"
             text += f"   {status_text}\n"
@@ -850,10 +804,20 @@ async def process_edit_workplace(message: types.Message, state: FSMContext):
     await message.answer(f"✅ Место изменено на {hbold(new_workplace)}", parse_mode="HTML")
     await show_main_menu(message, state)
 
-# ===== ОБРАБОТЧИК СОЗДАНИЯ ЗАЯВКИ =====
+# ===== ОБРАБОТЧИК СОЗДАНИЯ ЗАЯВКИ (С КНОПКОЙ ОТМЕНЫ) =====
 @dp.message(Form.problem)
 async def process_problem(message: types.Message, state: FSMContext):
-    # Проверяем, нет ли уже активной заявки
+    # Проверка на отмену
+    if message.text == "◀️ Отмена":
+        user = Database.get_user(message.from_user.id)
+        if user:
+            await state.update_data(name=user[0], workplace=user[1])
+            await show_main_menu(message, state, user)
+        else:
+            await start_registration(message, state)
+        return
+    
+    # Проверка на активные заявки
     if Database.has_active_ticket(message.from_user.id):
         tickets = Database.get_user_tickets(message.from_user.id, limit=1)
         if tickets:
@@ -865,21 +829,16 @@ async def process_problem(message: types.Message, state: FSMContext):
             )
         return
     
-    # Получаем данные из состояния
     data = await state.get_data()
     
-    # Проверяем, есть ли имя и место в состоянии
     if 'name' not in data or 'workplace' not in data:
-        # Пробуем восстановить из базы данных
         user = Database.get_user(message.from_user.id)
         if user:
             name, workplace, _ = user
-            # Восстанавливаем данные в состоянии
             await state.update_data(name=name, workplace=workplace)
-            data = {'name': name, 'workplace': workplace}  # Явно создаем словарь
+            data = {'name': name, 'workplace': workplace}
             logger.info(f"🔄 Восстановлены данные для {message.from_user.id} из БД")
         else:
-            # Если и в базе нет - отправляем на регистрацию
             await message.answer(
                 "❌ Данные не найдены. Пройдите регистрацию заново.",
                 reply_markup=ReplyKeyboardRemove()
@@ -898,7 +857,6 @@ async def process_problem(message: types.Message, state: FSMContext):
         )
         return
     
-    # Создаём заявку (теперь data точно содержит name и workplace)
     ticket_id = Database.create_ticket(
         message.from_user.id,
         data['name'],
@@ -906,7 +864,6 @@ async def process_problem(message: types.Message, state: FSMContext):
         problem
     )
     
-    # Уведомление админу
     try:
         admin_message = (
             f"🚨 {hbold('НОВАЯ ЗАЯВКА')} #{ticket_id}\n\n"
@@ -923,7 +880,6 @@ async def process_problem(message: types.Message, state: FSMContext):
             parse_mode="HTML"
         )
         
-        # Подтверждение пользователю
         await message.answer(
             f"✅ {hbold('Заявка создана!')}\n\n"
             f"🎫 Номер заявки: {hbold(f'#{ticket_id}')}\n"
@@ -934,7 +890,6 @@ async def process_problem(message: types.Message, state: FSMContext):
             reply_markup=ReplyKeyboardRemove()
         )
         
-        # Возврат в меню (теперь без кнопки "Новая заявка")
         await asyncio.sleep(1)
         await show_main_menu(message, state)
         
@@ -968,14 +923,7 @@ async def admin_actions(message: types.Message, state: FSMContext):
         for ticket in tickets:
             ticket_id, user_id, user_name, workplace, problem, created_at, status = ticket
             
-            if isinstance(created_at, str):
-                try:
-                    created_time = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
-                except:
-                    created_time = created_at
-            else:
-                created_time = created_at.strftime('%d.%m.%Y %H:%M') if hasattr(created_at, 'strftime') else str(created_at)
-            
+            created_time = to_moscow_time(created_at) or str(created_at)
             status_emoji = get_status_emoji(status)
             
             text = (
@@ -1070,10 +1018,8 @@ async def process_mailing(message: types.Message, state: FSMContext):
         await message.answer("❌ Текст слишком длинный (макс. 4000 символов). Сократите сообщение:")
         return
     
-    # Сохраняем текст
     await state.update_data(mailing_text=mailing_text)
     
-    # Показываем предпросмотр
     await message.answer(
         f"📋 **ПРЕДПРОСМОТР РАССЫЛКИ:**\n\n"
         f"{mailing_text}\n\n"
@@ -1096,7 +1042,6 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("⛔ У вас нет прав")
         return
     
-    # Обработка кнопок рассылки
     if callback.data in ['mailing_send', 'mailing_cancel']:
         if callback.data == "mailing_cancel":
             await callback.message.edit_text("❌ Рассылка отменена")
@@ -1105,7 +1050,6 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
             await callback.answer()
             return
         
-        # Получаем текст рассылки
         data = await state.get_data()
         mailing_text = data.get('mailing_text')
         
@@ -1116,7 +1060,6 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
             await callback.answer()
             return
         
-        # Получаем всех активных пользователей
         users = Database.get_all_users(include_blocked=False)
         
         if not users:
@@ -1126,7 +1069,6 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
             await callback.answer()
             return
         
-        # Обновляем сообщение
         await callback.message.edit_text(
             f"📤 **Начинаю рассылку...**\n"
             f"👥 Получателей: {len(users)}\n"
@@ -1134,7 +1076,6 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
             parse_mode="Markdown"
         )
         
-        # Отправляем рассылку
         success = 0
         failed = 0
         blocked = 0
@@ -1150,7 +1091,6 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
                 )
                 success += 1
                 
-                # Обновляем статус каждые 10%
                 if i % max(1, len(users) // 10) == 0:
                     percent = int(i / len(users) * 100)
                     await status_message.edit_text(f"🔄 Отправка... {percent}%")
@@ -1163,7 +1103,6 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
             
             await asyncio.sleep(0.05)
         
-        # Отчет
         report = (
             f"📊 **ОТЧЕТ О РАССЫЛКЕ**\n\n"
             f"👥 Всего: {len(users)}\n"
@@ -1176,13 +1115,11 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
         
         await status_message.edit_text(report, parse_mode="Markdown")
         
-        # Возвращаемся в админ-панель
         await state.clear()
         await show_admin_panel(callback.message, state)
         await callback.answer()
         return
     
-    # Обработка кнопок заявок
     try:
         action, ticket_id = callback.data.split('_')
         ticket_id = int(ticket_id)
@@ -1198,7 +1135,6 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
     
     if action == "accept":
         if Database.accept_ticket(ticket_id):
-            # Уведомление пользователю
             try:
                 await bot.send_message(
                     ticket[1],
@@ -1220,7 +1156,6 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
     elif action == "resolve":
         resolution_note = "Решено"
         if Database.resolve_ticket(ticket_id, resolution_note):
-            # Уведомление пользователю
             try:
                 await bot.send_message(
                     ticket[1],
@@ -1228,17 +1163,9 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
                     f"🎫 #{ticket_id}\n"
                     f"❓ {ticket[4]}\n\n"
                     f"Спасибо за обращение!",
-                    parse_mode="HTML"
+                    parse_mode="HTML",
+                    reply_markup=get_main_menu_keyboard(False)
                 )
-                
-                # ===== ИСПРАВЛЕНИЕ: обновляем клавиатуру пользователя =====
-                # Отправляем пользователю обновленную клавиатуру
-                await bot.send_message(
-                    ticket[1],
-                    "✅📊🎫⏳",
-                    reply_markup=get_main_menu_keyboard(False)  # False = нет активных заявок
-                )
-                # ======================================================
                 
             except Exception as e:
                 logger.error(f"Не удалось уведомить пользователя {ticket[1]}: {e}")
@@ -1262,7 +1189,6 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
 # ===== ОБРАБОТЧИК КОМАНДЫ /send =====
 @dp.message(Command("send"))
 async def cmd_send(message: types.Message, state: FSMContext):
-    """Команда для быстрой рассылки /send текст"""
     if message.from_user.id != ADMIN_ID:
         await message.answer("⛔ Только админ может делать рассылку")
         return
@@ -1275,11 +1201,9 @@ async def cmd_send(message: types.Message, state: FSMContext):
         )
         return
     
-    # Сохраняем текст
     await state.update_data(mailing_text=text)
     await state.set_state(AdminStates.mailing_text)
     
-    # Показываем предпросмотр
     await message.answer(
         f"📋 **ПРЕДПРОСМОТР РАССЫЛКИ:**\n\n"
         f"{text}\n\n"
@@ -1298,23 +1222,18 @@ async def cmd_send(message: types.Message, state: FSMContext):
 # ===== УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК =====
 @dp.message()
 async def handle_unknown(message: types.Message, state: FSMContext):
-    """Обработчик для любых других сообщений"""
     user_id = message.from_user.id
     current_state = await state.get_state()
     
-    # Проверка на пустое сообщение
     if not message.text or message.text.isspace():
-        # Игнорируем пустые сообщения
         return
     
-    # Проверяем пользователя
     user = Database.get_user(user_id)
     
     if not user:
         await start_registration(message, state)
         return
     
-    # Если нет состояния - показываем меню
     if current_state is None:
         if user_id == ADMIN_ID:
             await show_admin_panel(message, state)
@@ -1322,7 +1241,6 @@ async def handle_unknown(message: types.Message, state: FSMContext):
             await show_main_menu(message, state, user)
         return
     
-    # Если состояние есть - напоминаем
     state_hints = {
         Form.name: "✏️ Введите ваше имя",
         Form.workplace: "📍 Выберите рабочее место из списка",
@@ -1336,37 +1254,30 @@ async def handle_unknown(message: types.Message, state: FSMContext):
     }
     
     if current_state in state_hints:
-        keyboard = get_appropriate_keyboard(current_state)
+        keyboards = {
+            Form.workplace: get_workplace_keyboard(),
+            Form.problem: get_problem_keyboard(),
+            Form.edit_choice: get_main_menu_keyboard(False),
+            Form.edit_profile: get_edit_profile_keyboard(),
+            Form.edit_workplace: get_workplace_keyboard(),
+            AdminStates.choosing_action: get_admin_main_keyboard()
+        }
+        keyboard = keyboards.get(current_state, ReplyKeyboardRemove())
         await message.answer(f"⚠️ {state_hints[current_state]}", reply_markup=keyboard)
-
-def get_appropriate_keyboard(state):
-    """Возвращает клавиатуру для состояния"""
-    keyboards = {
-        Form.workplace: get_workplace_keyboard(),
-        Form.problem: get_problem_keyboard(),
-        Form.edit_choice: get_main_menu_keyboard(False),  # Явно указываем параметр
-        Form.edit_profile: get_edit_profile_keyboard(),
-        Form.edit_workplace: get_workplace_keyboard(),
-        AdminStates.choosing_action: get_admin_main_keyboard()
-    }
-    return keyboards.get(state, ReplyKeyboardRemove())
 
 # ===== ЗАПУСК БОТА =====
 async def main():
     print("="*60)
     print("🚀 БОТ ДЛЯ ВЫЗОВА СИСАДМИНА")
-    print("✅ Быстрая регистрация без переспросов")
-    print("✅ Защита от повторных заявок")
-    print("✅ Автообновление меню после решения заявки")  # Новое!
-    print("✅ Полноценная рассылка")
+    print("✅ Исправлено: двойное нажатие")
+    print("✅ Исправлено: лишнее сообщение")
+    print("✅ Исправлено: время (Москва UTC+3)")
+    print("✅ Добавлено: кнопка Отмена при создании заявки")
     print(f"👤 Админ ID: {ADMIN_ID}")
     print(f"📁 База данных: {DB_PATH}")
-    print(f"🧹 Автоочистка: каждые {CLEANUP_INTERVAL_HOURS}ч")
     print("="*60)
     
-    # Запускаем фоновую очистку
     asyncio.create_task(periodic_cleanup())
-    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
