@@ -446,13 +446,25 @@ def to_moscow_time(db_time):
 
 # ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
 async def show_main_menu(message: types.Message, state: FSMContext, user_data=None, show_active_status=True):
-    if user_data and len(user_data) >= 2:
-        name = user_data[0]
-        workplace = user_data[1]
-    else:
+    # Если user_data не передан - пробуем получить из состояния
+    if not user_data:
         data = await state.get_data()
-        name = data.get('name', 'Пользователь')
-        workplace = data.get('workplace', 'не указано')
+        if 'name' not in data or 'workplace' not in data:
+            # Если в состоянии нет - пробуем из БД
+            user = Database.get_user(message.from_user.id)
+            if user:
+                name, workplace, _ = user
+                await state.update_data(name=name, workplace=workplace)
+                user_data = (name, workplace)
+            else:
+                # Если ничего нет - отправляем на регистрацию
+                await start_registration(message, state)
+                return
+        else:
+            user_data = (data['name'], data['workplace'])
+    
+    name = user_data[0]
+    workplace = user_data[1]
     
     has_active = Database.has_active_ticket(message.from_user.id)
     
@@ -687,6 +699,20 @@ async def process_workplace(message: types.Message, state: FSMContext):
 @dp.message(Form.edit_choice)
 async def process_main_menu(message: types.Message, state: FSMContext):
     data = await state.get_data()
+    
+    # ПРОВЕРКА: есть ли имя в данных состояния?
+    if 'name' not in data or 'workplace' not in data:
+        # Если нет - пробуем получить из базы данных
+        user = Database.get_user(message.from_user.id)
+        if user:
+            name, workplace, _ = user
+            await state.update_data(name=name, workplace=workplace)
+            data = {'name': name, 'workplace': workplace}
+            logger.info(f"🔄 Восстановлены данные для {message.from_user.id} из БД")
+        else:
+            # Если и в БД нет - отправляем на регистрацию
+            await start_registration(message, state)
+            return
     
     has_active = Database.has_active_ticket(message.from_user.id)
     
@@ -1282,6 +1308,7 @@ async def main():
     print("="*60)
     print("🚀 БОТ ДЛЯ ВЫЗОВА СИСАДМИНА")
     print("✅ Исправлено: двойное нажатие")
+    print("✅ Исправлена ошибка KeyError: 'name'")
     print(f"👤 Админ ID: {ADMIN_ID}")
     print(f"📁 База данных: {DB_PATH}")
     print("="*60)
