@@ -117,15 +117,19 @@ class Database:
 
     @staticmethod
     def get_user(user_id):
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT name, workplace, is_blocked FROM users WHERE user_id = ?", 
-            (user_id,)
-        )
-        user = cursor.fetchone()
-        conn.close()
-        return user
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT name, workplace, is_blocked FROM users WHERE user_id = ?", 
+                (user_id,)
+            )
+            user = cursor.fetchone()
+            conn.close()
+            return user
+        except Exception as e:
+            logger.error(f"Ошибка получения пользователя {user_id}: {e}")
+            return None
 
     @staticmethod
     def save_user(user_id, name, workplace):
@@ -259,7 +263,7 @@ class Database:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, user_id, user_name, workplace, problem, created_at
+            SELECT id, user_id, user_name, workplace, problem, created_at, status
             FROM tickets 
             WHERE status IN ('new', 'accepted')
             ORDER BY 
@@ -293,16 +297,24 @@ class Database:
     def resolve_ticket(ticket_id, resolution_note=None):
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+        
+        # Получаем текущие заметки
+        cursor.execute("SELECT admin_notes FROM tickets WHERE id = ?", (ticket_id,))
+        current_notes = cursor.fetchone()
+        
+        if current_notes and current_notes[0]:
+            new_notes = f"{current_notes[0]}\n✅ Решение: {resolution_note}" if resolution_note else current_notes[0]
+        else:
+            new_notes = f"✅ Решение: {resolution_note}" if resolution_note else None
+        
         cursor.execute("""
             UPDATE tickets 
             SET status = 'resolved', 
                 resolved_at = CURRENT_TIMESTAMP,
-                admin_notes = CASE 
-                    WHEN admin_notes IS NULL THEN ? 
-                    ELSE admin_notes || '\nРешение: ' || ? 
-                END
+                admin_notes = ?
             WHERE id = ? AND status IN ('new', 'accepted')
-        """, (resolution_note, resolution_note, ticket_id))
+        """, (new_notes, ticket_id))
+        
         success = cursor.rowcount > 0
         conn.commit()
         conn.close()
@@ -433,7 +445,7 @@ def get_ticket_action_keyboard(ticket_id):
 # ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
 async def show_main_menu(message: types.Message, state: FSMContext, user_data=None):
     """Показывает главное меню для пользователя с проверкой активных заявок"""
-    if user_data:
+    if user_data and len(user_data) >= 2:
         name, workplace, _ = user_data
     else:
         data = await state.get_data()
@@ -510,10 +522,13 @@ def format_ticket_info(ticket):
         }.get(status, status)
         
         # Безопасное преобразование даты
-        try:
-            created_time = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
-        except:
-            created_time = created_at
+        if isinstance(created_at, str):
+            try:
+                created_time = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+            except:
+                created_time = created_at
+        else:
+            created_time = created_at.strftime('%d.%m.%Y %H:%M') if hasattr(created_at, 'strftime') else str(created_at)
         
         info = (
             f"{status_emoji} {hbold(f'Заявка #{ticket_id}')}\n"
@@ -524,18 +539,24 @@ def format_ticket_info(ticket):
         )
         
         if accepted_at:
-            try:
-                accepted_time = datetime.strptime(accepted_at, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
-                info += f"\n✅ Принята: {accepted_time}"
-            except:
-                info += f"\n✅ Принята: {accepted_at}"
+            if isinstance(accepted_at, str):
+                try:
+                    accepted_time = datetime.strptime(accepted_at, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+                except:
+                    accepted_time = accepted_at
+            else:
+                accepted_time = accepted_at.strftime('%d.%m.%Y %H:%M') if hasattr(accepted_at, 'strftime') else str(accepted_at)
+            info += f"\n✅ Принята: {accepted_time}"
         
         if resolved_at:
-            try:
-                resolved_time = datetime.strptime(resolved_at, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
-                info += f"\n🎉 Решена: {resolved_time}"
-            except:
-                info += f"\n🎉 Решена: {resolved_at}"
+            if isinstance(resolved_at, str):
+                try:
+                    resolved_time = datetime.strptime(resolved_at, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+                except:
+                    resolved_time = resolved_at
+            else:
+                resolved_time = resolved_at.strftime('%d.%m.%Y %H:%M') if hasattr(resolved_at, 'strftime') else str(resolved_at)
+            info += f"\n🎉 Решена: {resolved_time}"
         
         if admin_notes:
             info += f"\n📝 Заметки: {admin_notes}"
@@ -581,8 +602,12 @@ async def cmd_start(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
     
     if current_state:
+        # Сохраняем данные перед очисткой
+        data = await state.get_data()
         await state.clear()
-        await message.answer("🔄 Перезапускаю бота...")
+        # Восстанавливаем данные, если они были
+        if data:
+            await state.update_data(data)
     
     user = Database.get_user(user_id)
     
@@ -738,10 +763,13 @@ async def process_main_menu(message: types.Message, state: FSMContext):
                 'resolved': '✅ Решена'
             }.get(status, status)
             
-            try:
-                created_time = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
-            except:
-                created_time = created_at
+            if isinstance(created_at, str):
+                try:
+                    created_time = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+                except:
+                    created_time = created_at
+            else:
+                created_time = created_at.strftime('%d.%m.%Y %H:%M') if hasattr(created_at, 'strftime') else str(created_at)
             
             text += f"{status_emoji} {hbold(f'#{ticket_id}')} | {problem}\n"
             text += f"   {status_text}\n"
@@ -837,7 +865,6 @@ async def process_problem(message: types.Message, state: FSMContext):
             )
         return
     
-    # ===== ИСПРАВЛЕНИЕ ОШИБКИ KEYERROR =====
     # Получаем данные из состояния
     data = await state.get_data()
     
@@ -849,7 +876,7 @@ async def process_problem(message: types.Message, state: FSMContext):
             name, workplace, _ = user
             # Восстанавливаем данные в состоянии
             await state.update_data(name=name, workplace=workplace)
-            data = await state.get_data()  # Обновляем data
+            data = {'name': name, 'workplace': workplace}  # Явно создаем словарь
             logger.info(f"🔄 Восстановлены данные для {message.from_user.id} из БД")
         else:
             # Если и в базе нет - отправляем на регистрацию
@@ -939,15 +966,17 @@ async def admin_actions(message: types.Message, state: FSMContext):
             return
         
         for ticket in tickets:
-            ticket_id, user_id, user_name, workplace, problem, created_at = ticket
+            ticket_id, user_id, user_name, workplace, problem, created_at, status = ticket
             
-            try:
-                created_time = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
-            except:
-                created_time = created_at
+            if isinstance(created_at, str):
+                try:
+                    created_time = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y %H:%M')
+                except:
+                    created_time = created_at
+            else:
+                created_time = created_at.strftime('%d.%m.%Y %H:%M') if hasattr(created_at, 'strftime') else str(created_at)
             
-            full_ticket = Database.get_ticket(ticket_id)
-            status_emoji = get_status_emoji(full_ticket[5])
+            status_emoji = get_status_emoji(status)
             
             text = (
                 f"{status_emoji} {hbold(f'Заявка #{ticket_id}')}\n"
@@ -1189,7 +1218,8 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
             await callback.answer("✅ Принято!")
     
     elif action == "resolve":
-        if Database.resolve_ticket(ticket_id):
+        resolution_note = "Решено"
+        if Database.resolve_ticket(ticket_id, resolution_note):
             # Уведомление пользователю
             try:
                 await bot.send_message(
@@ -1200,8 +1230,18 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
                     f"Спасибо за обращение!",
                     parse_mode="HTML"
                 )
-            except:
-                pass
+                
+                # ===== ИСПРАВЛЕНИЕ: обновляем клавиатуру пользователя =====
+                # Отправляем пользователю обновленную клавиатуру
+                await bot.send_message(
+                    ticket[1],
+                    "🔄 Ваше меню обновлено. Теперь вы можете создать новую заявку!",
+                    reply_markup=get_main_menu_keyboard(False)  # False = нет активных заявок
+                )
+                # ======================================================
+                
+            except Exception as e:
+                logger.error(f"Не удалось уведомить пользователя {ticket[1]}: {e}")
             
             await callback.message.edit_text(
                 f"✅ Заявка #{ticket_id} РЕШЕНА!",
@@ -1317,6 +1357,7 @@ async def main():
     print("🚀 БОТ ДЛЯ ВЫЗОВА СИСАДМИНА")
     print("✅ Быстрая регистрация без переспросов")
     print("✅ Защита от повторных заявок")
+    print("✅ Автообновление меню после решения заявки")  # Новое!
     print("✅ Полноценная рассылка")
     print(f"👤 Админ ID: {ADMIN_ID}")
     print(f"📁 База данных: {DB_PATH}")
