@@ -409,7 +409,7 @@ def get_problem_keyboard():
             [KeyboardButton(text="Сильвер"), KeyboardButton(text="ВПН")],
             [KeyboardButton(text="Проблемы с ПК"), KeyboardButton(text="Картридж")],
             [KeyboardButton(text="Камеры"), KeyboardButton(text="ПАМАГИТИ")],
-            [KeyboardButton(text="◀️ Отмена")]  # Кнопка возврата
+            [KeyboardButton(text="◀️ Отмена")]
         ],
         resize_keyboard=True
     )
@@ -445,9 +445,10 @@ def to_moscow_time(db_time):
         return str(db_time)
 
 # ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
-async def show_main_menu(message: types.Message, state: FSMContext, user_data=None):
+async def show_main_menu(message: types.Message, state: FSMContext, user_data=None, show_active_status=True):
     if user_data and len(user_data) >= 2:
-        name, workplace, _ = user_data
+        name = user_data[0]
+        workplace = user_data[1]
     else:
         data = await state.get_data()
         name = data.get('name', 'Пользователь')
@@ -455,18 +456,26 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_data=No
     
     has_active = Database.has_active_ticket(message.from_user.id)
     
-    if has_active:
-        active_warning = "\n\n⚠️ **У вас есть активная заявка! Новая заявка будет доступна после её решения.**"
-    else:
-        active_warning = ""
-    
     await state.set_state(Form.edit_choice)
     
+    # РАЗНЫЕ СООБЩЕНИЯ В ЗАВИСИМОСТИ ОТ НАЛИЧИЯ ЗАЯВКИ
+    if has_active and show_active_status:
+        # ЕСТЬ АКТИВНАЯ ЗАЯВКА - показываем ожидание + ссылку на "Мои заявки"
+        status_message = (
+            f"👋 {hbold(name)}!\n\n"
+            f"⏳ Ожидайте, сисадмин ответит на заявку\n\n"
+            f"📋 Статус можно посмотреть в «Мои заявки»"
+        )
+    else:
+        # НЕТ АКТИВНОЙ ЗАЯВКИ - показываем имя и место
+        status_message = (
+            f"👋 {hbold(name)}!\n"
+            f"📍 {hbold(workplace)}\n\n"
+            f"Что хотите сделать?"
+        )
+    
     await message.answer(
-        f"👋 С возвращением, {hbold(name)}!\n"
-        f"📍 Ваше место: {hbold(workplace)}\n"
-        f"{active_warning}\n\n"
-        f"Что хотите сделать?",
+        status_message,
         reply_markup=get_main_menu_keyboard(has_active),
         parse_mode="HTML"
     )
@@ -685,10 +694,10 @@ async def process_main_menu(message: types.Message, state: FSMContext):
         if has_active:
             tickets = Database.get_user_tickets(message.from_user.id, limit=1)
             if tickets:
+                await state.set_state(Form.edit_choice)
                 await message.answer(
                     f"❌ **Нельзя создать новую заявку!**\n\n"
-                    f"У вас уже есть активная заявка #{tickets[0][0]}\n"
-                    f"Дождитесь её решения.",
+                    f"У вас уже есть активная заявка #{tickets[0][0]}",
                     parse_mode="HTML",
                     reply_markup=get_main_menu_keyboard(has_active)
                 )
@@ -821,6 +830,7 @@ async def process_problem(message: types.Message, state: FSMContext):
     if Database.has_active_ticket(message.from_user.id):
         tickets = Database.get_user_tickets(message.from_user.id, limit=1)
         if tickets:
+            await state.set_state(Form.edit_choice)
             await message.answer(
                 f"❌ **Нельзя создать новую заявку!**\n\n"
                 f"У вас уже есть активная заявка #{tickets[0][0]}",
@@ -880,18 +890,19 @@ async def process_problem(message: types.Message, state: FSMContext):
             parse_mode="HTML"
         )
         
+        # ПЕРВОЕ СООБЩЕНИЕ - подтверждение создания
         await message.answer(
             f"✅ {hbold('Заявка создана!')}\n\n"
             f"🎫 Номер заявки: {hbold(f'#{ticket_id}')}\n"
             f"❓ Проблема: {problem}\n\n"
-            f"👨‍💻 Сисадмин получил уведомление.\n"
-            f"📋 Статус заявки можно отслеживать в разделе «Мои заявки»",
+            f"👨‍💻 Сисадмин получил уведомление.",
             parse_mode="HTML",
             reply_markup=ReplyKeyboardRemove()
         )
         
+        # ВТОРОЕ СООБЩЕНИЕ - меню с ожиданием
         await asyncio.sleep(1)
-        await show_main_menu(message, state)
+        await show_main_menu(message, state, show_active_status=True)
         
     except Exception as e:
         logger.error(f"❌ Ошибка отправки админу: {e}")
@@ -899,6 +910,7 @@ async def process_problem(message: types.Message, state: FSMContext):
             "⚠️ Не удалось отправить заявку. Попробуйте позже.",
             reply_markup=ReplyKeyboardRemove()
         )
+        await state.set_state(Form.edit_choice)
         await show_main_menu(message, state)
 
 # ===== ОБРАБОТЧИКИ АДМИН-ПАНЕЛИ =====
@@ -1270,9 +1282,6 @@ async def main():
     print("="*60)
     print("🚀 БОТ ДЛЯ ВЫЗОВА СИСАДМИНА")
     print("✅ Исправлено: двойное нажатие")
-    print("✅ Исправлено: лишнее сообщение")
-    print("✅ Исправлено: время (Москва UTC+3)")
-    print("✅ Добавлено: кнопка Отмена при создании заявки")
     print(f"👤 Админ ID: {ADMIN_ID}")
     print(f"📁 База данных: {DB_PATH}")
     print("="*60)
