@@ -32,63 +32,92 @@ TICKETS_RETENTION_DAYS = 30
 MAX_TICKETS_PER_USER = 20
 CLEANUP_INTERVAL_HOURS = 24
 
+# ===== КОНСТАНТЫ ДЛЯ ПРОВЕРКИ =====
+VALID_WORKPLACES = [
+    "Офис1", "Офис2", "Ресепшен", "Менеджеры", "Касса", 
+    "РОП,РКС,Приемка", "Логистика", "Салон б/у", "Сервис", "Склад"
+]
+
+VALID_PROBLEMS = [
+    "1С", "Принтер", "Сильвер", "ВПН", "Проблемы с ПК", 
+    "Картридж", "Камеры", "ПАМАГИТИ"
+]
+
 # ===== ЛОГИРОВАНИЕ =====
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # ===== СОЗДАЁМ БОТА =====
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# ===== БАЗА ДАННЫХ =====
+# ===== БАЗА ДАННЫХ (ПЕРЕПИСАЛ С ЗАЩИТОЙ ОТ ОШИБОК) =====
 class Database:
     @staticmethod
+    def get_connection():
+        """Создает соединение с БД с правильными настройками"""
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn.row_factory = sqlite3.Row  # Теперь можно обращаться по именам колонок
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    @staticmethod
     def init_db():
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        cursor.execute("PRAGMA journal_mode=WAL")
-        
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                workplace TEXT NOT NULL,
-                registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                is_blocked INTEGER DEFAULT 0,
-                last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS tickets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                user_name TEXT NOT NULL,
-                workplace TEXT NOT NULL,
-                problem TEXT NOT NULL,
-                status TEXT DEFAULT 'new',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                accepted_at TIMESTAMP,
-                resolved_at TIMESTAMP,
-                admin_notes TEXT,
-                FOREIGN KEY (user_id) REFERENCES users (user_id)
-            )
-        """)
-        
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tickets_user ON tickets(user_id)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tickets_created ON tickets(created_at)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_active ON users(last_active)")
-        
-        conn.commit()
-        conn.close()
-        logger.info("✅ База данных инициализирована")
+        """Инициализация базы данных"""
+        try:
+            conn = Database.get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    workplace TEXT NOT NULL,
+                    registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_blocked INTEGER DEFAULT 0,
+                    last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS tickets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    user_name TEXT NOT NULL,
+                    workplace TEXT NOT NULL,
+                    problem TEXT NOT NULL,
+                    status TEXT DEFAULT 'new',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    accepted_at TIMESTAMP,
+                    resolved_at TIMESTAMP,
+                    admin_notes TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
+                )
+            """)
+            
+            # Индексы для быстрого поиска
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_tickets_user ON tickets(user_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_tickets_created ON tickets(created_at)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_active ON users(last_active)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_blocked ON users(is_blocked)")
+            
+            conn.commit()
+            conn.close()
+            logger.info("✅ База данных инициализирована")
+        except Exception as e:
+            logger.error(f"❌ Ошибка инициализации БД: {e}")
+            raise
 
     @staticmethod
     def cleanup_old_tickets():
+        """Очистка старых решенных заявок"""
         try:
-            conn = sqlite3.connect(DB_PATH)
+            conn = Database.get_connection()
             cursor = conn.cursor()
             
             cutoff_date = (datetime.now() - timedelta(days=TICKETS_RETENTION_DAYS)).strftime('%Y-%m-%d %H:%M:%S')
@@ -107,224 +136,292 @@ class Database:
             
             return deleted
         except Exception as e:
-            logger.error(f"Ошибка при очистке БД: {e}")
+            logger.error(f"❌ Ошибка при очистке БД: {e}")
             return 0
 
     @staticmethod
     def get_user(user_id):
+        """Получение данных пользователя"""
         try:
-            conn = sqlite3.connect(DB_PATH)
+            conn = Database.get_connection()
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT name, workplace, is_blocked FROM users WHERE user_id = ?", 
+                "SELECT name, workplace, is_blocked, last_active FROM users WHERE user_id = ?", 
                 (user_id,)
             )
-            user = cursor.fetchone()
+            row = cursor.fetchone()
             conn.close()
-            return user
+            return tuple(row) if row else None
         except Exception as e:
-            logger.error(f"Ошибка получения пользователя {user_id}: {e}")
+            logger.error(f"❌ Ошибка получения пользователя {user_id}: {e}")
             return None
 
     @staticmethod
     def save_user(user_id, name, workplace):
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO users (user_id, name, workplace, last_active) 
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(user_id) DO UPDATE SET 
-                name = excluded.name,
-                workplace = excluded.workplace,
-                is_blocked = 0,
-                last_active = CURRENT_TIMESTAMP
-        """, (user_id, name, workplace))
-        conn.commit()
-        conn.close()
-        return True
+        """Сохранение/обновление пользователя"""
+        try:
+            conn = Database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO users (user_id, name, workplace, last_active) 
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET 
+                    name = excluded.name,
+                    workplace = excluded.workplace,
+                    is_blocked = 0,
+                    last_active = CURRENT_TIMESTAMP
+            """, (user_id, name, workplace))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения пользователя {user_id}: {e}")
+            return False
 
     @staticmethod
     def mark_user_blocked(user_id):
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE users SET is_blocked = 1 WHERE user_id = ?", 
-            (user_id,)
-        )
-        conn.commit()
-        conn.close()
+        """Пометить пользователя как заблокировавшего бота"""
+        try:
+            conn = Database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE users SET is_blocked = 1 WHERE user_id = ?", 
+                (user_id,)
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"❌ Ошибка блокировки пользователя {user_id}: {e}")
 
     @staticmethod
     def mark_user_unblocked(user_id):
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE users SET is_blocked = 0, last_active = CURRENT_TIMESTAMP WHERE user_id = ?", 
-            (user_id,)
-        )
-        conn.commit()
-        conn.close()
+        """Пометить пользователя как разблокировавшего бота"""
+        try:
+            conn = Database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE users SET is_blocked = 0, last_active = CURRENT_TIMESTAMP WHERE user_id = ?", 
+                (user_id,)
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"❌ Ошибка разблокировки пользователя {user_id}: {e}")
 
     @staticmethod
     def get_all_users(include_blocked=False):
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        if include_blocked:
-            cursor.execute("SELECT user_id, name FROM users ORDER BY registered_at DESC")
-        else:
-            cursor.execute("SELECT user_id, name FROM users WHERE is_blocked = 0 ORDER BY registered_at DESC")
-        users = cursor.fetchall()
-        conn.close()
-        return users
+        """Получение списка всех пользователей"""
+        try:
+            conn = Database.get_connection()
+            cursor = conn.cursor()
+            if include_blocked:
+                cursor.execute("SELECT user_id, name FROM users ORDER BY registered_at DESC")
+            else:
+                cursor.execute("SELECT user_id, name FROM users WHERE is_blocked = 0 ORDER BY registered_at DESC")
+            users = cursor.fetchall()
+            conn.close()
+            return [tuple(user) for user in users]
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения списка пользователей: {e}")
+            return []
 
     @staticmethod
     def get_stats():
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM users")
-        total_users = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM users WHERE is_blocked = 1")
-        blocked_users = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM tickets WHERE status = 'new'")
-        new_tickets = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM tickets WHERE status = 'accepted'")
-        active_tickets = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM tickets WHERE status = 'resolved'")
-        resolved_tickets = cursor.fetchone()[0]
-        conn.close()
-        return {
-            "total_users": total_users,
-            "blocked_users": blocked_users,
-            "active_users": total_users - blocked_users,
-            "new_tickets": new_tickets,
-            "active_tickets": active_tickets,
-            "resolved_tickets": resolved_tickets
-        }
+        """Получение статистики"""
+        try:
+            conn = Database.get_connection()
+            cursor = conn.cursor()
+            
+            stats = {}
+            cursor.execute("SELECT COUNT(*) FROM users")
+            stats['total_users'] = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM users WHERE is_blocked = 1")
+            stats['blocked_users'] = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM tickets WHERE status = 'new'")
+            stats['new_tickets'] = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM tickets WHERE status = 'accepted'")
+            stats['active_tickets'] = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM tickets WHERE status = 'resolved'")
+            stats['resolved_tickets'] = cursor.fetchone()[0]
+            
+            stats['active_users'] = stats['total_users'] - stats['blocked_users']
+            
+            conn.close()
+            return stats
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения статистики: {e}")
+            return {
+                "total_users": 0, "blocked_users": 0, "active_users": 0,
+                "new_tickets": 0, "active_tickets": 0, "resolved_tickets": 0
+            }
 
     @staticmethod
     def update_last_active(user_id):
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE user_id = ?", 
-            (user_id,)
-        )
-        conn.commit()
-        conn.close()
+        """Обновление времени последней активности"""
+        try:
+            conn = Database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE user_id = ?", 
+                (user_id,)
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"❌ Ошибка обновления активности {user_id}: {e}")
 
     @staticmethod
     def create_ticket(user_id, user_name, workplace, problem):
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO tickets (user_id, user_name, workplace, problem, status)
-            VALUES (?, ?, ?, ?, 'new')
-        """, (user_id, user_name, workplace, problem))
-        ticket_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
-        return ticket_id
+        """Создание новой заявки"""
+        try:
+            conn = Database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO tickets (user_id, user_name, workplace, problem, status)
+                VALUES (?, ?, ?, ?, 'new')
+            """, (user_id, user_name, workplace, problem))
+            ticket_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+            return ticket_id
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания заявки: {e}")
+            return None
 
     @staticmethod
     def get_ticket(ticket_id):
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, user_id, user_name, workplace, problem, status, 
-                   created_at, accepted_at, resolved_at, admin_notes
-            FROM tickets WHERE id = ?
-        """, (ticket_id,))
-        ticket = cursor.fetchone()
-        conn.close()
-        return ticket
+        """Получение информации о заявке"""
+        try:
+            conn = Database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, user_id, user_name, workplace, problem, status, 
+                       created_at, accepted_at, resolved_at, admin_notes
+                FROM tickets WHERE id = ?
+            """, (ticket_id,))
+            ticket = cursor.fetchone()
+            conn.close()
+            return tuple(ticket) if ticket else None
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения заявки #{ticket_id}: {e}")
+            return None
 
     @staticmethod
     def get_user_tickets(user_id, limit=20):
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, problem, status, created_at, resolved_at
-            FROM tickets 
-            WHERE user_id = ? 
-            ORDER BY created_at DESC 
-            LIMIT ?
-        """, (user_id, limit))
-        tickets = cursor.fetchall()
-        conn.close()
-        return tickets
+        """Получение заявок пользователя"""
+        try:
+            conn = Database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, problem, status, created_at, resolved_at
+                FROM tickets 
+                WHERE user_id = ? 
+                ORDER BY created_at DESC 
+                LIMIT ?
+            """, (user_id, limit))
+            tickets = cursor.fetchall()
+            conn.close()
+            return [tuple(t) for t in tickets]
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения заявок пользователя {user_id}: {e}")
+            return []
 
     @staticmethod
     def get_active_tickets():
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, user_id, user_name, workplace, problem, created_at, status
-            FROM tickets 
-            WHERE status IN ('new', 'accepted')
-            ORDER BY 
-                CASE status 
-                    WHEN 'new' THEN 1 
-                    WHEN 'accepted' THEN 2 
-                END,
-                created_at ASC
-        """)
-        tickets = cursor.fetchall()
-        conn.close()
-        return tickets
+        """Получение всех активных заявок"""
+        try:
+            conn = Database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, user_id, user_name, workplace, problem, created_at, status
+                FROM tickets 
+                WHERE status IN ('new', 'accepted')
+                ORDER BY 
+                    CASE status 
+                        WHEN 'new' THEN 1 
+                        WHEN 'accepted' THEN 2 
+                    END,
+                    created_at ASC
+            """)
+            tickets = cursor.fetchall()
+            conn.close()
+            return [tuple(t) for t in tickets]
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения активных заявок: {e}")
+            return []
 
     @staticmethod
     def accept_ticket(ticket_id, admin_notes=None):
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE tickets 
-            SET status = 'accepted', 
-                accepted_at = CURRENT_TIMESTAMP,
-                admin_notes = ?
-            WHERE id = ? AND status = 'new'
-        """, (admin_notes, ticket_id))
-        success = cursor.rowcount > 0
-        conn.commit()
-        conn.close()
-        return success
+        """Принять заявку в работу"""
+        try:
+            conn = Database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE tickets 
+                SET status = 'accepted', 
+                    accepted_at = CURRENT_TIMESTAMP,
+                    admin_notes = ?
+                WHERE id = ? AND status = 'new'
+            """, (admin_notes, ticket_id))
+            success = cursor.rowcount > 0
+            conn.commit()
+            conn.close()
+            return success
+        except Exception as e:
+            logger.error(f"❌ Ошибка принятия заявки #{ticket_id}: {e}")
+            return False
 
     @staticmethod
     def resolve_ticket(ticket_id, resolution_note=None):
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT admin_notes FROM tickets WHERE id = ?", (ticket_id,))
-        current_notes = cursor.fetchone()
-        
-        if current_notes and current_notes[0]:
-            new_notes = f"{current_notes[0]}\n✅ Решение: {resolution_note}" if resolution_note else current_notes[0]
-        else:
-            new_notes = f"✅ Решение: {resolution_note}" if resolution_note else None
-        
-        cursor.execute("""
-            UPDATE tickets 
-            SET status = 'resolved', 
-                resolved_at = CURRENT_TIMESTAMP,
-                admin_notes = ?
-            WHERE id = ? AND status IN ('new', 'accepted')
-        """, (new_notes, ticket_id))
-        
-        success = cursor.rowcount > 0
-        conn.commit()
-        conn.close()
-        return success
+        """Закрыть заявку как решенную"""
+        try:
+            conn = Database.get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT admin_notes FROM tickets WHERE id = ?", (ticket_id,))
+            current_notes = cursor.fetchone()
+            
+            if current_notes and current_notes[0]:
+                new_notes = f"{current_notes[0]}\n✅ Решение: {resolution_note}" if resolution_note else current_notes[0]
+            else:
+                new_notes = f"✅ Решение: {resolution_note}" if resolution_note else None
+            
+            cursor.execute("""
+                UPDATE tickets 
+                SET status = 'resolved', 
+                    resolved_at = CURRENT_TIMESTAMP,
+                    admin_notes = ?
+                WHERE id = ? AND status IN ('new', 'accepted')
+            """, (new_notes, ticket_id))
+            
+            success = cursor.rowcount > 0
+            conn.commit()
+            conn.close()
+            return success
+        except Exception as e:
+            logger.error(f"❌ Ошибка закрытия заявки #{ticket_id}: {e}")
+            return False
 
     @staticmethod
     def has_active_ticket(user_id):
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT COUNT(*) FROM tickets 
-            WHERE user_id = ? AND status IN ('new', 'accepted')
-        """, (user_id,))
-        count = cursor.fetchone()[0]
-        conn.close()
-        return count > 0
+        """Проверка наличия активной заявки у пользователя"""
+        try:
+            conn = Database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*) FROM tickets 
+                WHERE user_id = ? AND status IN ('new', 'accepted')
+            """, (user_id,))
+            count = cursor.fetchone()[0]
+            conn.close()
+            return count > 0
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки активных заявок {user_id}: {e}")
+            return False
 
 # Создаём базу
 Database.init_db()
@@ -352,7 +449,8 @@ def get_admin_main_keyboard():
              KeyboardButton(text="📊 Статистика")],
             [KeyboardButton(text="📢 Рассылка"), 
              KeyboardButton(text="👥 Сотрудники")],
-            [KeyboardButton(text="🧹 Очистить старые заявки")]
+            [KeyboardButton(text="🧹 Очистить старые заявки"),
+             KeyboardButton(text="📝 Мои заявки")]  # Добавил для админа
         ],
         resize_keyboard=True
     )
@@ -391,26 +489,14 @@ def get_edit_profile_keyboard():
 
 def get_workplace_keyboard():
     keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="Офис1"), KeyboardButton(text="Офис2")],
-            [KeyboardButton(text="Ресепшен"), KeyboardButton(text="Менеджеры")],
-            [KeyboardButton(text="Касса"), KeyboardButton(text="РОП,РКС,Приемка")],
-            [KeyboardButton(text="Логистика"), KeyboardButton(text="Салон б/у")],
-            [KeyboardButton(text="Сервис"), KeyboardButton(text="Склад")]
-        ],
+        keyboard=[[KeyboardButton(text=place)] for place in VALID_WORKPLACES],
         resize_keyboard=True
     )
     return keyboard
 
 def get_problem_keyboard():
     keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="1С"), KeyboardButton(text="Принтер")],
-            [KeyboardButton(text="Сильвер"), KeyboardButton(text="ВПН")],
-            [KeyboardButton(text="Проблемы с ПК"), KeyboardButton(text="Картридж")],
-            [KeyboardButton(text="Камеры"), KeyboardButton(text="ПАМАГИТИ")],
-            [KeyboardButton(text="◀️ Отмена")]
-        ],
+        keyboard=[[KeyboardButton(text=problem)] for problem in VALID_PROBLEMS],
         resize_keyboard=True
     )
     return keyboard
@@ -446,18 +532,16 @@ def to_moscow_time(db_time):
 
 # ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
 async def show_main_menu(message: types.Message, state: FSMContext, user_data=None, show_active_status=True):
-    # Если user_data не передан - пробуем получить из состояния
+    """Показ главного меню с красивым приветствием"""
     if not user_data:
         data = await state.get_data()
         if 'name' not in data or 'workplace' not in data:
-            # Если в состоянии нет - пробуем из БД
             user = Database.get_user(message.from_user.id)
             if user:
-                name, workplace, _ = user
+                name, workplace, is_blocked, last_active = user
                 await state.update_data(name=name, workplace=workplace)
                 user_data = (name, workplace)
             else:
-                # Если ничего нет - отправляем на регистрацию
                 await start_registration(message, state)
                 return
         else:
@@ -466,22 +550,37 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_data=No
     name = user_data[0]
     workplace = user_data[1]
     
+    # Обновляем время последней активности
+    Database.update_last_active(message.from_user.id)
+    
     has_active = Database.has_active_ticket(message.from_user.id)
     
     await state.set_state(Form.edit_choice)
     
-    # РАЗНЫЕ СООБЩЕНИЯ В ЗАВИСИМОСТИ ОТ НАЛИЧИЯ ЗАЯВКИ
+    # Получаем время последнего визита для приветствия
+    user = Database.get_user(message.from_user.id)
+    last_active = user[3] if user and len(user) > 3 else None
+    
+    # Формируем приветствие
+    if last_active:
+        last_time = to_moscow_time(last_active)
+        greeting = f"👋 С возвращением, {hbold(name)}!"
+        time_info = f"\n⏱ Последний визит: {last_time}"
+    else:
+        greeting = f"👋 Привет, {hbold(name)}!"
+        time_info = ""
+    
+    # Разные сообщения в зависимости от наличия заявки
     if has_active and show_active_status:
-        # ЕСТЬ АКТИВНАЯ ЗАЯВКА - показываем ожидание + ссылку на "Мои заявки"
         status_message = (
-            f"👋 {hbold(name)}!\n\n"
+            f"{greeting}{time_info}\n\n"
+            f"📍 {hbold(workplace)}\n"
             f"⏳ Ожидайте, сисадмин ответит на заявку\n\n"
             f"📋 Статус можно посмотреть в «Мои заявки»"
         )
     else:
-        # НЕТ АКТИВНОЙ ЗАЯВКИ - показываем имя и место
         status_message = (
-            f"👋 {hbold(name)}!\n"
+            f"{greeting}{time_info}\n"
             f"📍 {hbold(workplace)}\n\n"
             f"Что хотите сделать?"
         )
@@ -493,6 +592,7 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_data=No
     )
 
 async def show_admin_panel(message: types.Message, state: FSMContext):
+    """Показ админ-панели"""
     await state.set_state(AdminStates.choosing_action)
     
     stats = Database.get_stats()
@@ -510,6 +610,7 @@ async def show_admin_panel(message: types.Message, state: FSMContext):
     )
 
 async def start_registration(message: types.Message, state: FSMContext):
+    """Начало регистрации нового пользователя"""
     await state.set_state(Form.name)
     await message.answer(
         "👋 Привет! Я бот для вызова сисадмина.\n"
@@ -519,6 +620,7 @@ async def start_registration(message: types.Message, state: FSMContext):
     )
 
 def get_status_emoji(status):
+    """Получение эмодзи для статуса заявки"""
     status_emojis = {
         'new': '🆕',
         'accepted': '🔄',
@@ -527,6 +629,7 @@ def get_status_emoji(status):
     return status_emojis.get(status, '❓')
 
 def format_ticket_info(ticket):
+    """Форматирование информации о заявке"""
     try:
         ticket_id, user_id, user_name, workplace, problem, status, created_at, accepted_at, resolved_at, admin_notes = ticket
         
@@ -563,8 +666,9 @@ def format_ticket_info(ticket):
         logger.error(f"Ошибка форматирования заявки: {e}")
         return f"Заявка #{ticket[0]} (ошибка форматирования)"
 
-# Фоновые задачи
+# ===== ФОНОВЫЕ ЗАДАЧИ =====
 async def periodic_cleanup():
+    """Периодическая очистка старых заявок"""
     while True:
         await asyncio.sleep(CLEANUP_INTERVAL_HOURS * 3600)
         deleted = Database.cleanup_old_tickets()
@@ -581,6 +685,7 @@ async def periodic_cleanup():
 # ===== ОБРАБОТЧИК СТАТУСА ЧАТА =====
 @dp.my_chat_member()
 async def handle_chat_member_update(update: ChatMemberUpdated):
+    """Обработка блокировки/разблокировки бота"""
     user_id = update.from_user.id
     if update.new_chat_member.status == "kicked":
         Database.mark_user_blocked(user_id)
@@ -594,9 +699,11 @@ async def handle_chat_member_update(update: ChatMemberUpdated):
 # ===== ОБРАБОТЧИКИ КОМАНД =====
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
+    """Обработка команды /start"""
     user_id = message.from_user.id
     current_state = await state.get_state()
     
+    # Очищаем состояние, но сохраняем данные
     if current_state:
         data = await state.get_data()
         await state.clear()
@@ -606,19 +713,38 @@ async def cmd_start(message: types.Message, state: FSMContext):
     user = Database.get_user(user_id)
     
     if user:
-        if user[2]:
+        name, workplace, is_blocked, last_active = user
+        if is_blocked:
             Database.mark_user_unblocked(user_id)
-        await state.update_data(name=user[0], workplace=user[1])
+        
+        await state.update_data(name=name, workplace=workplace)
+        
+        # Красивое приветствие при старте
+        if last_active:
+            last_time = to_moscow_time(last_active)
+            await message.answer(
+                f"✨ {hbold('Добро пожаловать обратно!')} ✨\n"
+                f"Рады снова вас видеть, {hbold(name)}!\n"
+                f"⏱ Последний визит: {last_time}",
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer(
+                f"✨ {hbold('С возвращением!')} ✨\n"
+                f"Рады вас видеть, {hbold(name)}!",
+                parse_mode="HTML"
+            )
         
         if user_id == ADMIN_ID:
             await show_admin_panel(message, state)
         else:
-            await show_main_menu(message, state, user)
+            await show_main_menu(message, state, (name, workplace))
     else:
         await start_registration(message, state)
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message, state: FSMContext):
+    """Команда для входа в админ-панель"""
     if message.from_user.id != ADMIN_ID:
         await message.answer("⛔ У вас нет прав для этой команды")
         return
@@ -628,6 +754,7 @@ async def cmd_admin(message: types.Message, state: FSMContext):
 
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext):
+    """Отмена текущего действия"""
     await state.clear()
     
     if message.from_user.id == ADMIN_ID:
@@ -635,8 +762,9 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
     else:
         user = Database.get_user(message.from_user.id)
         if user:
-            await state.update_data(name=user[0], workplace=user[1])
-            await show_main_menu(message, state, user)
+            name, workplace, is_blocked, last_active = user
+            await state.update_data(name=name, workplace=workplace)
+            await show_main_menu(message, state, (name, workplace))
         else:
             await message.answer(
                 "❌ Действие отменено.\n"
@@ -647,6 +775,7 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
 # ===== ОБРАБОТЧИКИ РЕГИСТРАЦИИ =====
 @dp.message(Form.name)
 async def process_name(message: types.Message, state: FSMContext):
+    """Обработка ввода имени"""
     name = message.text.strip()
     if len(name) < 2 or len(name) > 50:
         await message.answer("❌ Имя должно быть от 2 до 50 символов. Попробуйте еще раз:")
@@ -664,11 +793,10 @@ async def process_name(message: types.Message, state: FSMContext):
 
 @dp.message(Form.workplace)
 async def process_workplace(message: types.Message, state: FSMContext):
+    """Обработка выбора рабочего места"""
     workplace = message.text
-    valid_places = ["Офис1", "Офис2", "Ресепшен", "Менеджеры", "Касса", 
-                    "РОП,РКС,Приемка", "Логистика", "Салон б/у", "Сервис", "Склад"]
     
-    if workplace not in valid_places:
+    if workplace not in VALID_WORKPLACES:
         await message.answer(
             "❌ Пожалуйста, выберите место из списка:",
             reply_markup=get_workplace_keyboard()
@@ -693,24 +821,23 @@ async def process_workplace(message: types.Message, state: FSMContext):
     if message.from_user.id == ADMIN_ID:
         await show_admin_panel(message, state)
     else:
-        await show_main_menu(message, state, (name, workplace, 0))
+        await show_main_menu(message, state, (name, workplace))
 
 # ===== ОБРАБОТЧИКИ ГЛАВНОГО МЕНЮ =====
 @dp.message(Form.edit_choice)
 async def process_main_menu(message: types.Message, state: FSMContext):
+    """Обработка действий в главном меню"""
     data = await state.get_data()
     
-    # ПРОВЕРКА: есть ли имя в данных состояния?
+    # Проверка наличия данных
     if 'name' not in data or 'workplace' not in data:
-        # Если нет - пробуем получить из базы данных
         user = Database.get_user(message.from_user.id)
         if user:
-            name, workplace, _ = user
+            name, workplace, is_blocked, last_active = user
             await state.update_data(name=name, workplace=workplace)
             data = {'name': name, 'workplace': workplace}
             logger.info(f"🔄 Восстановлены данные для {message.from_user.id} из БД")
         else:
-            # Если и в БД нет - отправляем на регистрацию
             await start_registration(message, state)
             return
     
@@ -785,6 +912,7 @@ async def process_main_menu(message: types.Message, state: FSMContext):
 # ===== ОБРАБОТЧИКИ РЕДАКТИРОВАНИЯ ПРОФИЛЯ =====
 @dp.message(Form.edit_profile)
 async def process_edit_profile(message: types.Message, state: FSMContext):
+    """Обработка выбора действия для редактирования профиля"""
     if message.text == "✏️ Изменить имя":
         await state.set_state(Form.edit_name)
         await message.answer(
@@ -807,6 +935,12 @@ async def process_edit_profile(message: types.Message, state: FSMContext):
 
 @dp.message(Form.edit_name)
 async def process_edit_name(message: types.Message, state: FSMContext):
+    """Обработка изменения имени"""
+    user = Database.get_user(message.from_user.id)
+    if not user:
+        await start_registration(message, state)
+        return
+    
     new_name = message.text.strip()
     if len(new_name) < 2 or len(new_name) > 50:
         await message.answer("❌ Имя должно быть от 2 до 50 символов. Попробуйте еще раз:")
@@ -821,11 +955,15 @@ async def process_edit_name(message: types.Message, state: FSMContext):
 
 @dp.message(Form.edit_workplace)
 async def process_edit_workplace(message: types.Message, state: FSMContext):
-    new_workplace = message.text
-    valid_places = ["Офис1", "Офис2", "Ресепшен", "Менеджеры", "Касса", 
-                    "РОП,РКС,Приемка", "Логистика", "Салон б/у", "Сервис", "Склад"]
+    """Обработка изменения рабочего места"""
+    user = Database.get_user(message.from_user.id)
+    if not user:
+        await start_registration(message, state)
+        return
     
-    if new_workplace not in valid_places:
+    new_workplace = message.text
+    
+    if new_workplace not in VALID_WORKPLACES:
         await message.answer(
             "❌ Пожалуйста, выберите место из списка:",
             reply_markup=get_workplace_keyboard()
@@ -839,15 +977,17 @@ async def process_edit_workplace(message: types.Message, state: FSMContext):
     await message.answer(f"✅ Место изменено на {hbold(new_workplace)}", parse_mode="HTML")
     await show_main_menu(message, state)
 
-# ===== ОБРАБОТЧИК СОЗДАНИЯ ЗАЯВКИ (С КНОПКОЙ ОТМЕНЫ) =====
+# ===== ОБРАБОТЧИК СОЗДАНИЯ ЗАЯВКИ =====
 @dp.message(Form.problem)
 async def process_problem(message: types.Message, state: FSMContext):
+    """Обработка выбора проблемы и создание заявки"""
     # Проверка на отмену
     if message.text == "◀️ Отмена":
         user = Database.get_user(message.from_user.id)
         if user:
-            await state.update_data(name=user[0], workplace=user[1])
-            await show_main_menu(message, state, user)
+            name, workplace, is_blocked, last_active = user
+            await state.update_data(name=name, workplace=workplace)
+            await show_main_menu(message, state, (name, workplace))
         else:
             await start_registration(message, state)
         return
@@ -867,10 +1007,11 @@ async def process_problem(message: types.Message, state: FSMContext):
     
     data = await state.get_data()
     
+    # Проверка наличия данных
     if 'name' not in data or 'workplace' not in data:
         user = Database.get_user(message.from_user.id)
         if user:
-            name, workplace, _ = user
+            name, workplace, is_blocked, last_active = user
             await state.update_data(name=name, workplace=workplace)
             data = {'name': name, 'workplace': workplace}
             logger.info(f"🔄 Восстановлены данные для {message.from_user.id} из БД")
@@ -883,10 +1024,8 @@ async def process_problem(message: types.Message, state: FSMContext):
             return
     
     problem = message.text
-    valid_problems = ["1С", "Принтер", "Сильвер", "ВПН", "Проблемы с ПК", 
-                      "Картридж", "Камеры", "ПАМАГИТИ"]
     
-    if problem not in valid_problems:
+    if problem not in VALID_PROBLEMS:
         await message.answer(
             "❌ Пожалуйста, выберите проблему из списка:",
             reply_markup=get_problem_keyboard()
@@ -900,7 +1039,15 @@ async def process_problem(message: types.Message, state: FSMContext):
         problem
     )
     
+    if not ticket_id:
+        await message.answer(
+            "❌ Ошибка при создании заявки. Попробуйте позже.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return
+    
     try:
+        # Уведомление админу
         admin_message = (
             f"🚨 {hbold('НОВАЯ ЗАЯВКА')} #{ticket_id}\n\n"
             f"👤 Имя: {data['name']}\n"
@@ -916,7 +1063,7 @@ async def process_problem(message: types.Message, state: FSMContext):
             parse_mode="HTML"
         )
         
-        # ПЕРВОЕ СООБЩЕНИЕ - подтверждение создания
+        # Подтверждение пользователю
         await message.answer(
             f"✅ {hbold('Заявка создана!')}\n\n"
             f"🎫 Номер заявки: {hbold(f'#{ticket_id}')}\n"
@@ -926,9 +1073,9 @@ async def process_problem(message: types.Message, state: FSMContext):
             reply_markup=ReplyKeyboardRemove()
         )
         
-        # ВТОРОЕ СООБЩЕНИЕ - меню с ожиданием
+        # Показываем меню с ожиданием
         await asyncio.sleep(1)
-        await show_main_menu(message, state, show_active_status=True)
+        await show_main_menu(message, state, (data['name'], data['workplace']), show_active_status=True)
         
     except Exception as e:
         logger.error(f"❌ Ошибка отправки админу: {e}")
@@ -936,17 +1083,51 @@ async def process_problem(message: types.Message, state: FSMContext):
             "⚠️ Не удалось отправить заявку. Попробуйте позже.",
             reply_markup=ReplyKeyboardRemove()
         )
-        await state.set_state(Form.edit_choice)
-        await show_main_menu(message, state)
+        await show_main_menu(message, state, (data['name'], data['workplace']))
 
 # ===== ОБРАБОТЧИКИ АДМИН-ПАНЕЛИ =====
 @dp.message(AdminStates.choosing_action)
 async def admin_actions(message: types.Message, state: FSMContext):
+    """Обработка действий в админ-панели"""
     if message.from_user.id != ADMIN_ID:
         return
     
     if message.text == "👑 Админ-панель":
         await show_admin_panel(message, state)
+    
+    elif message.text == "📝 Мои заявки":  # Личные заявки админа
+        user = Database.get_user(message.from_user.id)
+        if user:
+            name, workplace, is_blocked, last_active = user
+            await state.update_data(name=name, workplace=workplace)
+            
+            tickets = Database.get_user_tickets(message.from_user.id)
+            
+            if not tickets:
+                await message.answer(
+                    "📭 У вас пока нет заявок.",
+                    reply_markup=get_admin_main_keyboard()
+                )
+                return
+            
+            text = f"{hbold('📋 Ваши заявки:')}\n\n"
+            for ticket in tickets:
+                ticket_id, problem, status, created_at, resolved_at = ticket
+                status_emoji = get_status_emoji(status)
+                status_text = {
+                    'new': '🆕 Новая',
+                    'accepted': '🔄 В работе',
+                    'resolved': '✅ Решена'
+                }.get(status, status)
+                created_time = to_moscow_time(created_at) or str(created_at)
+                
+                text += f"{status_emoji} {hbold(f'#{ticket_id}')} | {problem}\n"
+                text += f"   {status_text}\n"
+                text += f"   📅 {created_time}\n\n"
+            
+            await message.answer(text, parse_mode="HTML", reply_markup=get_admin_main_keyboard())
+        else:
+            await message.answer("❌ Профиль не найден")
     
     elif message.text == "📋 Активные заявки":
         tickets = Database.get_active_tickets()
@@ -1028,10 +1209,20 @@ async def admin_actions(message: types.Message, state: FSMContext):
         await message.answer(text, parse_mode="HTML", reply_markup=get_admin_main_keyboard())
     
     elif message.text == "🧹 Очистить старые заявки":
-        deleted = Database.cleanup_old_tickets()
+        # Добавил подтверждение
         await message.answer(
-            f"🧹 Удалено старых заявок: {deleted}",
-            reply_markup=get_admin_main_keyboard()
+            "🧹 **Подтвердите очистку**\n\n"
+            "Будут удалены все решенные заявки старше 30 дней.\n"
+            "Это действие нельзя отменить.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="✅ Да, очистить", callback_data="confirm_cleanup"),
+                        InlineKeyboardButton(text="❌ Нет, отмена", callback_data="cancel_cleanup")
+                    ]
+                ]
+            ),
+            parse_mode="Markdown"
         )
     
     else:
@@ -1043,6 +1234,7 @@ async def admin_actions(message: types.Message, state: FSMContext):
 # ===== ОБРАБОТЧИК РАССЫЛКИ =====
 @dp.message(AdminStates.mailing_text)
 async def process_mailing(message: types.Message, state: FSMContext):
+    """Обработка ввода текста для рассылки"""
     if message.from_user.id != ADMIN_ID:
         return
     
@@ -1076,10 +1268,26 @@ async def process_mailing(message: types.Message, state: FSMContext):
 # ===== ОБРАБОТЧИКИ ИНЛАЙН КНОПОК =====
 @dp.callback_query()
 async def process_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка всех инлайн кнопок"""
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ У вас нет прав")
         return
     
+    # Обработка подтверждения очистки
+    if callback.data == "confirm_cleanup":
+        deleted = Database.cleanup_old_tickets()
+        await callback.message.edit_text(
+            f"🧹 Очистка завершена!\nУдалено старых заявок: {deleted}"
+        )
+        await callback.answer()
+        return
+    
+    if callback.data == "cancel_cleanup":
+        await callback.message.edit_text("❌ Очистка отменена")
+        await callback.answer()
+        return
+    
+    # Обработка рассылки
     if callback.data in ['mailing_send', 'mailing_cancel']:
         if callback.data == "mailing_cancel":
             await callback.message.edit_text("❌ Рассылка отменена")
@@ -1158,6 +1366,7 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
+    # Обработка действий с заявками
     try:
         action, ticket_id = callback.data.split('_')
         ticket_id = int(ticket_id)
@@ -1227,6 +1436,7 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
 # ===== ОБРАБОТЧИК КОМАНДЫ /send =====
 @dp.message(Command("send"))
 async def cmd_send(message: types.Message, state: FSMContext):
+    """Быстрая рассылка через команду"""
     if message.from_user.id != ADMIN_ID:
         await message.answer("⛔ Только админ может делать рассылку")
         return
@@ -1260,6 +1470,7 @@ async def cmd_send(message: types.Message, state: FSMContext):
 # ===== УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК =====
 @dp.message()
 async def handle_unknown(message: types.Message, state: FSMContext):
+    """Обработка всех непойманных сообщений"""
     user_id = message.from_user.id
     current_state = await state.get_state()
     
@@ -1272,13 +1483,15 @@ async def handle_unknown(message: types.Message, state: FSMContext):
         await start_registration(message, state)
         return
     
+    # Если состояние не установлено - показываем соответствующее меню
     if current_state is None:
         if user_id == ADMIN_ID:
             await show_admin_panel(message, state)
         else:
-            await show_main_menu(message, state, user)
+            await show_main_menu(message, state, user[:2])  # Передаем только имя и место
         return
     
+    # Подсказки для каждого состояния
     state_hints = {
         Form.name: "✏️ Введите ваше имя",
         Form.workplace: "📍 Выберите рабочее место из списка",
@@ -1303,21 +1516,35 @@ async def handle_unknown(message: types.Message, state: FSMContext):
         keyboard = keyboards.get(current_state, ReplyKeyboardRemove())
         await message.answer(f"⚠️ {state_hints[current_state]}", reply_markup=keyboard)
 
+# ===== Graceful Shutdown =====
+async def shutdown():
+    """Корректное завершение работы"""
+    logger.info("🛑 Завершение работы...")
+    await bot.session.close()
+
 # ===== ЗАПУСК БОТА =====
 async def main():
     print("="*60)
     print("🚀 БОТ ДЛЯ ВЫЗОВА СИСАДМИНА")
-    print("✅ Исправлено: двойное нажатие")
-    print("✅ Исправлена ошибка KeyError: 'name'")
+    print("✅ Версия: ИДЕАЛЬНАЯ")
     print(f"👤 Админ ID: {ADMIN_ID}")
     print(f"📁 База данных: {DB_PATH}")
+    print(f"📊 Рабочих мест: {len(VALID_WORKPLACES)}")
+    print(f"❓ Проблем: {len(VALID_PROBLEMS)}")
     print("="*60)
     
+    # Запускаем фоновые задачи
     asyncio.create_task(periodic_cleanup())
-    await dp.start_polling(bot)
+    
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await shutdown()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("🛑 Бот остановлен")
+        print("\n🛑 Бот остановлен")
+    except Exception as e:
+        print(f"❌ Критическая ошибка: {e}")
