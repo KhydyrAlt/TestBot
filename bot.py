@@ -1235,7 +1235,7 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
                 # Отправляем пользователю обновленную клавиатуру
                 await bot.send_message(
                     ticket[1],
-                    "🔄 Ваше меню обновлено. Теперь вы можете создать новую заявку!",
+                    "✅📊🎫⏳",
                     reply_markup=get_main_menu_keyboard(False)  # False = нет активных заявок
                 )
                 # ======================================================
