@@ -17,6 +17,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.markdown import hbold
+import pytz
 
 # ===== ТВОИ НАСТРОЙКИ =====
 ADMIN_ID = 911966345  # Твой ID
@@ -32,7 +33,7 @@ TICKETS_RETENTION_DAYS = 30
 MAX_TICKETS_PER_USER = 20
 CLEANUP_INTERVAL_HOURS = 24
 
-# ===== КОНСТАНТЫ ДЛЯ ПРОВЕРКИ =====
+# ===== КОНСТАНТЫ =====
 VALID_WORKPLACES = [
     "Офис1", "Офис2", "Ресепшен", "Менеджеры", "Касса", 
     "РОП,РКС,Приемка", "Логистика", "Салон б/у", "Сервис", "Склад"
@@ -42,6 +43,10 @@ VALID_PROBLEMS = [
     "1С", "Принтер", "Сильвер", "ВПН", "Проблемы с ПК", 
     "Картридж", "Камеры", "ПАМАГИТИ"
 ]
+
+MIN_NAME_LENGTH = 2
+MAX_NAME_LENGTH = 50
+MAILING_MAX_LENGTH = 4000
 
 # ===== ЛОГИРОВАНИЕ =====
 logging.basicConfig(
@@ -54,13 +59,13 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# ===== БАЗА ДАННЫХ (ПЕРЕПИСАЛ С ЗАЩИТОЙ ОТ ОШИБОК) =====
+# ===== БАЗА ДАННЫХ =====
 class Database:
     @staticmethod
     def get_connection():
         """Создает соединение с БД с правильными настройками"""
         conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.row_factory = sqlite3.Row  # Теперь можно обращаться по именам колонок
+        conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
@@ -68,7 +73,11 @@ class Database:
     @staticmethod
     def init_db():
         """Инициализация базы данных"""
+        conn = None
         try:
+            if not os.path.exists(DB_PATH):
+                logger.info(f"📁 Создание новой БД: {DB_PATH}")
+            
             conn = Database.get_connection()
             cursor = conn.cursor()
             
@@ -99,7 +108,6 @@ class Database:
                 )
             """)
             
-            # Индексы для быстрого поиска
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_tickets_user ON tickets(user_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_tickets_created ON tickets(created_at)")
@@ -107,20 +115,23 @@ class Database:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_blocked ON users(is_blocked)")
             
             conn.commit()
-            conn.close()
             logger.info("✅ База данных инициализирована")
         except Exception as e:
             logger.error(f"❌ Ошибка инициализации БД: {e}")
             raise
+        finally:
+            if conn:
+                conn.close()
 
     @staticmethod
     def cleanup_old_tickets():
         """Очистка старых решенных заявок"""
+        conn = None
         try:
             conn = Database.get_connection()
             cursor = conn.cursor()
             
-            cutoff_date = (datetime.now() - timedelta(days=TICKETS_RETENTION_DAYS)).strftime('%Y-%m-%d %H:%M:%S')
+            cutoff_date = (datetime.now(pytz.UTC) - timedelta(days=TICKETS_RETENTION_DAYS)).strftime('%Y-%m-%d %H:%M:%S')
             cursor.execute("""
                 DELETE FROM tickets 
                 WHERE status = 'resolved' 
@@ -129,7 +140,6 @@ class Database:
             
             deleted = cursor.rowcount
             conn.commit()
-            conn.close()
             
             if deleted > 0:
                 logger.info(f"🧹 Автоочистка: удалено {deleted} старых заявок")
@@ -138,10 +148,14 @@ class Database:
         except Exception as e:
             logger.error(f"❌ Ошибка при очистке БД: {e}")
             return 0
+        finally:
+            if conn:
+                conn.close()
 
     @staticmethod
     def get_user(user_id):
         """Получение данных пользователя"""
+        conn = None
         try:
             conn = Database.get_connection()
             cursor = conn.cursor()
@@ -150,15 +164,20 @@ class Database:
                 (user_id,)
             )
             row = cursor.fetchone()
-            conn.close()
-            return tuple(row) if row else None
+            if row:
+                return (row[0], row[1], row[2], row[3])
+            return None
         except Exception as e:
             logger.error(f"❌ Ошибка получения пользователя {user_id}: {e}")
             return None
+        finally:
+            if conn:
+                conn.close()
 
     @staticmethod
     def save_user(user_id, name, workplace):
         """Сохранение/обновление пользователя"""
+        conn = None
         try:
             conn = Database.get_connection()
             cursor = conn.cursor()
@@ -172,15 +191,18 @@ class Database:
                     last_active = CURRENT_TIMESTAMP
             """, (user_id, name, workplace))
             conn.commit()
-            conn.close()
             return True
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения пользователя {user_id}: {e}")
             return False
+        finally:
+            if conn:
+                conn.close()
 
     @staticmethod
     def mark_user_blocked(user_id):
         """Пометить пользователя как заблокировавшего бота"""
+        conn = None
         try:
             conn = Database.get_connection()
             cursor = conn.cursor()
@@ -189,13 +211,16 @@ class Database:
                 (user_id,)
             )
             conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"❌ Ошибка блокировки пользователя {user_id}: {e}")
+        finally:
+            if conn:
+                conn.close()
 
     @staticmethod
     def mark_user_unblocked(user_id):
         """Пометить пользователя как разблокировавшего бота"""
+        conn = None
         try:
             conn = Database.get_connection()
             cursor = conn.cursor()
@@ -204,13 +229,16 @@ class Database:
                 (user_id,)
             )
             conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"❌ Ошибка разблокировки пользователя {user_id}: {e}")
+        finally:
+            if conn:
+                conn.close()
 
     @staticmethod
     def get_all_users(include_blocked=False):
         """Получение списка всех пользователей"""
+        conn = None
         try:
             conn = Database.get_connection()
             cursor = conn.cursor()
@@ -219,49 +247,59 @@ class Database:
             else:
                 cursor.execute("SELECT user_id, name FROM users WHERE is_blocked = 0 ORDER BY registered_at DESC")
             users = cursor.fetchall()
-            conn.close()
-            return [tuple(user) for user in users]
+            return [(user[0], user[1]) for user in users]
         except Exception as e:
             logger.error(f"❌ Ошибка получения списка пользователей: {e}")
             return []
+        finally:
+            if conn:
+                conn.close()
 
     @staticmethod
     def get_stats():
         """Получение статистики"""
+        conn = None
         try:
             conn = Database.get_connection()
             cursor = conn.cursor()
             
-            stats = {}
             cursor.execute("SELECT COUNT(*) FROM users")
-            stats['total_users'] = cursor.fetchone()[0]
+            total_users = cursor.fetchone()[0]
             
             cursor.execute("SELECT COUNT(*) FROM users WHERE is_blocked = 1")
-            stats['blocked_users'] = cursor.fetchone()[0]
+            blocked_users = cursor.fetchone()[0]
             
             cursor.execute("SELECT COUNT(*) FROM tickets WHERE status = 'new'")
-            stats['new_tickets'] = cursor.fetchone()[0]
+            new_tickets = cursor.fetchone()[0]
             
             cursor.execute("SELECT COUNT(*) FROM tickets WHERE status = 'accepted'")
-            stats['active_tickets'] = cursor.fetchone()[0]
+            active_tickets = cursor.fetchone()[0]
             
             cursor.execute("SELECT COUNT(*) FROM tickets WHERE status = 'resolved'")
-            stats['resolved_tickets'] = cursor.fetchone()[0]
+            resolved_tickets = cursor.fetchone()[0]
             
-            stats['active_users'] = stats['total_users'] - stats['blocked_users']
-            
-            conn.close()
-            return stats
+            return {
+                "total_users": total_users,
+                "blocked_users": blocked_users,
+                "active_users": total_users - blocked_users,
+                "new_tickets": new_tickets,
+                "active_tickets": active_tickets,
+                "resolved_tickets": resolved_tickets
+            }
         except Exception as e:
             logger.error(f"❌ Ошибка получения статистики: {e}")
             return {
                 "total_users": 0, "blocked_users": 0, "active_users": 0,
                 "new_tickets": 0, "active_tickets": 0, "resolved_tickets": 0
             }
+        finally:
+            if conn:
+                conn.close()
 
     @staticmethod
     def update_last_active(user_id):
         """Обновление времени последней активности"""
+        conn = None
         try:
             conn = Database.get_connection()
             cursor = conn.cursor()
@@ -270,13 +308,16 @@ class Database:
                 (user_id,)
             )
             conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"❌ Ошибка обновления активности {user_id}: {e}")
+        finally:
+            if conn:
+                conn.close()
 
     @staticmethod
     def create_ticket(user_id, user_name, workplace, problem):
         """Создание новой заявки"""
+        conn = None
         try:
             conn = Database.get_connection()
             cursor = conn.cursor()
@@ -286,15 +327,18 @@ class Database:
             """, (user_id, user_name, workplace, problem))
             ticket_id = cursor.lastrowid
             conn.commit()
-            conn.close()
             return ticket_id
         except Exception as e:
             logger.error(f"❌ Ошибка создания заявки: {e}")
             return None
+        finally:
+            if conn:
+                conn.close()
 
     @staticmethod
     def get_ticket(ticket_id):
         """Получение информации о заявке"""
+        conn = None
         try:
             conn = Database.get_connection()
             cursor = conn.cursor()
@@ -304,15 +348,21 @@ class Database:
                 FROM tickets WHERE id = ?
             """, (ticket_id,))
             ticket = cursor.fetchone()
-            conn.close()
-            return tuple(ticket) if ticket else None
+            if ticket:
+                return (ticket[0], ticket[1], ticket[2], ticket[3], ticket[4], 
+                        ticket[5], ticket[6], ticket[7], ticket[8], ticket[9])
+            return None
         except Exception as e:
             logger.error(f"❌ Ошибка получения заявки #{ticket_id}: {e}")
             return None
+        finally:
+            if conn:
+                conn.close()
 
     @staticmethod
     def get_user_tickets(user_id, limit=20):
         """Получение заявок пользователя"""
+        conn = None
         try:
             conn = Database.get_connection()
             cursor = conn.cursor()
@@ -324,15 +374,18 @@ class Database:
                 LIMIT ?
             """, (user_id, limit))
             tickets = cursor.fetchall()
-            conn.close()
-            return [tuple(t) for t in tickets]
+            return [(t[0], t[1], t[2], t[3], t[4]) for t in tickets]
         except Exception as e:
             logger.error(f"❌ Ошибка получения заявок пользователя {user_id}: {e}")
             return []
+        finally:
+            if conn:
+                conn.close()
 
     @staticmethod
     def get_active_tickets():
         """Получение всех активных заявок"""
+        conn = None
         try:
             conn = Database.get_connection()
             cursor = conn.cursor()
@@ -348,15 +401,18 @@ class Database:
                     created_at ASC
             """)
             tickets = cursor.fetchall()
-            conn.close()
-            return [tuple(t) for t in tickets]
+            return [(t[0], t[1], t[2], t[3], t[4], t[5], t[6]) for t in tickets]
         except Exception as e:
             logger.error(f"❌ Ошибка получения активных заявок: {e}")
             return []
+        finally:
+            if conn:
+                conn.close()
 
     @staticmethod
     def accept_ticket(ticket_id, admin_notes=None):
         """Принять заявку в работу"""
+        conn = None
         try:
             conn = Database.get_connection()
             cursor = conn.cursor()
@@ -369,24 +425,28 @@ class Database:
             """, (admin_notes, ticket_id))
             success = cursor.rowcount > 0
             conn.commit()
-            conn.close()
             return success
         except Exception as e:
             logger.error(f"❌ Ошибка принятия заявки #{ticket_id}: {e}")
             return False
+        finally:
+            if conn:
+                conn.close()
 
     @staticmethod
     def resolve_ticket(ticket_id, resolution_note=None):
         """Закрыть заявку как решенную"""
+        conn = None
         try:
             conn = Database.get_connection()
             cursor = conn.cursor()
             
             cursor.execute("SELECT admin_notes FROM tickets WHERE id = ?", (ticket_id,))
-            current_notes = cursor.fetchone()
+            row = cursor.fetchone()
+            current_notes = row[0] if row else None
             
-            if current_notes and current_notes[0]:
-                new_notes = f"{current_notes[0]}\n✅ Решение: {resolution_note}" if resolution_note else current_notes[0]
+            if current_notes and current_notes is not None:
+                new_notes = f"{current_notes}\n✅ Решение: {resolution_note}" if resolution_note else current_notes
             else:
                 new_notes = f"✅ Решение: {resolution_note}" if resolution_note else None
             
@@ -400,15 +460,18 @@ class Database:
             
             success = cursor.rowcount > 0
             conn.commit()
-            conn.close()
             return success
         except Exception as e:
             logger.error(f"❌ Ошибка закрытия заявки #{ticket_id}: {e}")
             return False
+        finally:
+            if conn:
+                conn.close()
 
     @staticmethod
     def has_active_ticket(user_id):
         """Проверка наличия активной заявки у пользователя"""
+        conn = None
         try:
             conn = Database.get_connection()
             cursor = conn.cursor()
@@ -417,11 +480,13 @@ class Database:
                 WHERE user_id = ? AND status IN ('new', 'accepted')
             """, (user_id,))
             count = cursor.fetchone()[0]
-            conn.close()
             return count > 0
         except Exception as e:
             logger.error(f"❌ Ошибка проверки активных заявок {user_id}: {e}")
             return False
+        finally:
+            if conn:
+                conn.close()
 
 # Создаём базу
 Database.init_db()
@@ -450,7 +515,7 @@ def get_admin_main_keyboard():
             [KeyboardButton(text="📢 Рассылка"), 
              KeyboardButton(text="👥 Сотрудники")],
             [KeyboardButton(text="🧹 Очистить старые заявки"),
-             KeyboardButton(text="📝 Мои заявки")]  # Добавил для админа
+             KeyboardButton(text="📝 Мои заявки")]
         ],
         resize_keyboard=True
     )
@@ -495,8 +560,26 @@ def get_workplace_keyboard():
     return keyboard
 
 def get_problem_keyboard():
+    """Клавиатура с проблемами в 2 колонки + кнопка Назад"""
+    problems = VALID_PROBLEMS.copy()
+    
+    # Формируем ряды по 2 кнопки
+    keyboard_rows = []
+    for i in range(0, len(problems), 2):
+        if i + 1 < len(problems):
+            row = [
+                KeyboardButton(text=problems[i]),
+                KeyboardButton(text=problems[i + 1])
+            ]
+        else:
+            row = [KeyboardButton(text=problems[i])]
+        keyboard_rows.append(row)
+    
+    # Добавляем кнопку "◀️ Назад" внизу
+    keyboard_rows.append([KeyboardButton(text="◀️ Назад")])
+    
     keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=problem)] for problem in VALID_PROBLEMS],
+        keyboard=keyboard_rows,
         resize_keyboard=True
     )
     return keyboard
@@ -513,9 +596,9 @@ def get_ticket_action_keyboard(ticket_id):
     )
     return keyboard
 
-# ===== ФУНКЦИЯ ДЛЯ КОНВЕРТАЦИИ ВРЕМЕНИ (МОСКВА UTC+3) =====
+# ===== ФУНКЦИЯ ДЛЯ КОНВЕРТАЦИИ ВРЕМЕНИ (МОСКВА) =====
 def to_moscow_time(db_time):
-    """Конвертирует UTC время из БД в московское (UTC+3)"""
+    """Конвертирует UTC время из БД в московское время"""
     if not db_time:
         return None
     try:
@@ -523,9 +606,12 @@ def to_moscow_time(db_time):
             dt = datetime.strptime(db_time, '%Y-%m-%d %H:%M:%S')
         else:
             dt = db_time
-        # Добавляем 3 часа (Москва)
-        moscow_time = dt + timedelta(hours=3)
-        return moscow_time.strftime('%d.%m.%Y %H:%M')
+        
+        # Устанавливаем UTC и конвертируем в Москву
+        moscow_tz = pytz.timezone('Europe/Moscow')
+        utc_dt = dt.replace(tzinfo=pytz.UTC)
+        moscow_dt = utc_dt.astimezone(moscow_tz)
+        return moscow_dt.strftime('%d.%m.%Y %H:%M')
     except Exception as e:
         logger.error(f"Ошибка конвертации времени: {e}")
         return str(db_time)
@@ -557,18 +643,40 @@ async def show_main_menu(message: types.Message, state: FSMContext, user_data=No
     
     await state.set_state(Form.edit_choice)
     
-    # Получаем время последнего визита для приветствия
-    user = Database.get_user(message.from_user.id)
-    last_active = user[3] if user and len(user) > 3 else None
+    # Проверяем, было ли только что создание заявки
+    data = await state.get_data()
+    just_created = data.get('just_created', False)
     
-    # Формируем приветствие
-    if last_active:
-        last_time = to_moscow_time(last_active)
-        greeting = f"👋 С возвращением, {hbold(name)}!"
-        time_info = f"\n⏱ Последний визит: {last_time}"
-    else:
-        greeting = f"👋 Привет, {hbold(name)}!"
+    if just_created:
+        # Если только что создали заявку - просто имя
+        greeting = f"👋 {hbold(name)}"
         time_info = ""
+        # Сбрасываем флаг
+        await state.update_data(just_created=False)
+    else:
+        # Обычное приветствие с проверкой времени
+        user = Database.get_user(message.from_user.id)
+        last_active = user[3] if user and len(user) > 3 else None
+        
+        if last_active:
+            # Проверяем, прошло ли больше 5 минут с последнего визита
+            now = datetime.now()
+            if isinstance(last_active, str):
+                last_active = datetime.strptime(last_active, '%Y-%m-%d %H:%M:%S')
+            
+            time_diff = now - last_active
+            if time_diff > timedelta(minutes=5):
+                # Если прошло больше 5 минут - "с возвращением"
+                last_time = to_moscow_time(last_active)
+                greeting = f"👋 С возвращением, {hbold(name)}!"
+                time_info = f"\n⏱ Последний визит: {last_time}"
+            else:
+                # Если меньше 5 минут - просто привет
+                greeting = f"👋 {hbold(name)}"
+                time_info = ""
+        else:
+            greeting = f"👋 {hbold(name)}"
+            time_info = ""
     
     # Разные сообщения в зависимости от наличия заявки
     if has_active and show_active_status:
@@ -703,7 +811,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     current_state = await state.get_state()
     
-    # Очищаем состояние, но сохраняем данные
     if current_state:
         data = await state.get_data()
         await state.clear()
@@ -719,7 +826,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
         
         await state.update_data(name=name, workplace=workplace)
         
-        # Красивое приветствие при старте
         if last_active:
             last_time = to_moscow_time(last_active)
             await message.answer(
@@ -777,8 +883,8 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
 async def process_name(message: types.Message, state: FSMContext):
     """Обработка ввода имени"""
     name = message.text.strip()
-    if len(name) < 2 or len(name) > 50:
-        await message.answer("❌ Имя должно быть от 2 до 50 символов. Попробуйте еще раз:")
+    if len(name) < MIN_NAME_LENGTH or len(name) > MAX_NAME_LENGTH:
+        await message.answer(f"❌ Имя должно быть от {MIN_NAME_LENGTH} до {MAX_NAME_LENGTH} символов. Попробуйте еще раз:")
         return
     
     await state.update_data(name=name)
@@ -829,14 +935,12 @@ async def process_main_menu(message: types.Message, state: FSMContext):
     """Обработка действий в главном меню"""
     data = await state.get_data()
     
-    # Проверка наличия данных
     if 'name' not in data or 'workplace' not in data:
         user = Database.get_user(message.from_user.id)
         if user:
             name, workplace, is_blocked, last_active = user
             await state.update_data(name=name, workplace=workplace)
             data = {'name': name, 'workplace': workplace}
-            logger.info(f"🔄 Восстановлены данные для {message.from_user.id} из БД")
         else:
             await start_registration(message, state)
             return
@@ -942,8 +1046,8 @@ async def process_edit_name(message: types.Message, state: FSMContext):
         return
     
     new_name = message.text.strip()
-    if len(new_name) < 2 or len(new_name) > 50:
-        await message.answer("❌ Имя должно быть от 2 до 50 символов. Попробуйте еще раз:")
+    if len(new_name) < MIN_NAME_LENGTH or len(new_name) > MAX_NAME_LENGTH:
+        await message.answer(f"❌ Имя должно быть от {MIN_NAME_LENGTH} до {MAX_NAME_LENGTH} символов. Попробуйте еще раз:")
         return
     
     data = await state.get_data()
@@ -981,8 +1085,8 @@ async def process_edit_workplace(message: types.Message, state: FSMContext):
 @dp.message(Form.problem)
 async def process_problem(message: types.Message, state: FSMContext):
     """Обработка выбора проблемы и создание заявки"""
-    # Проверка на отмену
-    if message.text == "◀️ Отмена":
+    # Проверка на возврат в меню
+    if message.text == "◀️ Назад":
         user = Database.get_user(message.from_user.id)
         if user:
             name, workplace, is_blocked, last_active = user
@@ -1007,14 +1111,12 @@ async def process_problem(message: types.Message, state: FSMContext):
     
     data = await state.get_data()
     
-    # Проверка наличия данных
     if 'name' not in data or 'workplace' not in data:
         user = Database.get_user(message.from_user.id)
         if user:
             name, workplace, is_blocked, last_active = user
             await state.update_data(name=name, workplace=workplace)
             data = {'name': name, 'workplace': workplace}
-            logger.info(f"🔄 Восстановлены данные для {message.from_user.id} из БД")
         else:
             await message.answer(
                 "❌ Данные не найдены. Пройдите регистрацию заново.",
@@ -1047,7 +1149,6 @@ async def process_problem(message: types.Message, state: FSMContext):
         return
     
     try:
-        # Уведомление админу
         admin_message = (
             f"🚨 {hbold('НОВАЯ ЗАЯВКА')} #{ticket_id}\n\n"
             f"👤 Имя: {data['name']}\n"
@@ -1063,7 +1164,6 @@ async def process_problem(message: types.Message, state: FSMContext):
             parse_mode="HTML"
         )
         
-        # Подтверждение пользователю
         await message.answer(
             f"✅ {hbold('Заявка создана!')}\n\n"
             f"🎫 Номер заявки: {hbold(f'#{ticket_id}')}\n"
@@ -1073,7 +1173,9 @@ async def process_problem(message: types.Message, state: FSMContext):
             reply_markup=ReplyKeyboardRemove()
         )
         
-        # Показываем меню с ожиданием
+        # Устанавливаем флаг, что только что создали заявку
+        await state.update_data(just_created=True)
+        
         await asyncio.sleep(1)
         await show_main_menu(message, state, (data['name'], data['workplace']), show_active_status=True)
         
@@ -1095,39 +1197,40 @@ async def admin_actions(message: types.Message, state: FSMContext):
     if message.text == "👑 Админ-панель":
         await show_admin_panel(message, state)
     
-    elif message.text == "📝 Мои заявки":  # Личные заявки админа
+    elif message.text == "📝 Мои заявки":
         user = Database.get_user(message.from_user.id)
-        if user:
-            name, workplace, is_blocked, last_active = user
-            await state.update_data(name=name, workplace=workplace)
-            
-            tickets = Database.get_user_tickets(message.from_user.id)
-            
-            if not tickets:
-                await message.answer(
-                    "📭 У вас пока нет заявок.",
-                    reply_markup=get_admin_main_keyboard()
-                )
-                return
-            
-            text = f"{hbold('📋 Ваши заявки:')}\n\n"
-            for ticket in tickets:
-                ticket_id, problem, status, created_at, resolved_at = ticket
-                status_emoji = get_status_emoji(status)
-                status_text = {
-                    'new': '🆕 Новая',
-                    'accepted': '🔄 В работе',
-                    'resolved': '✅ Решена'
-                }.get(status, status)
-                created_time = to_moscow_time(created_at) or str(created_at)
-                
-                text += f"{status_emoji} {hbold(f'#{ticket_id}')} | {problem}\n"
-                text += f"   {status_text}\n"
-                text += f"   📅 {created_time}\n\n"
-            
-            await message.answer(text, parse_mode="HTML", reply_markup=get_admin_main_keyboard())
-        else:
+        if not user:
             await message.answer("❌ Профиль не найден")
+            return
+        
+        name, workplace, is_blocked, last_active = user
+        await state.update_data(name=name, workplace=workplace)
+        
+        tickets = Database.get_user_tickets(message.from_user.id)
+        
+        if not tickets:
+            await message.answer(
+                "📭 У вас пока нет заявок.",
+                reply_markup=get_admin_main_keyboard()
+            )
+            return
+        
+        text = f"{hbold('📋 Ваши личные заявки:')}\n\n"
+        for ticket in tickets:
+            ticket_id, problem, status, created_at, resolved_at = ticket
+            status_emoji = get_status_emoji(status)
+            status_text = {
+                'new': '🆕 Новая',
+                'accepted': '🔄 В работе',
+                'resolved': '✅ Решена'
+            }.get(status, status)
+            created_time = to_moscow_time(created_at) or str(created_at)
+            
+            text += f"{status_emoji} {hbold(f'#{ticket_id}')} | {problem}\n"
+            text += f"   {status_text}\n"
+            text += f"   📅 {created_time}\n\n"
+        
+        await message.answer(text, parse_mode="HTML", reply_markup=get_admin_main_keyboard())
     
     elif message.text == "📋 Активные заявки":
         tickets = Database.get_active_tickets()
@@ -1209,7 +1312,6 @@ async def admin_actions(message: types.Message, state: FSMContext):
         await message.answer(text, parse_mode="HTML", reply_markup=get_admin_main_keyboard())
     
     elif message.text == "🧹 Очистить старые заявки":
-        # Добавил подтверждение
         await message.answer(
             "🧹 **Подтвердите очистку**\n\n"
             "Будут удалены все решенные заявки старше 30 дней.\n"
@@ -1244,8 +1346,8 @@ async def process_mailing(message: types.Message, state: FSMContext):
         await message.answer("❌ Текст не может быть пустым. Введите текст рассылки:")
         return
     
-    if len(mailing_text) > 4000:
-        await message.answer("❌ Текст слишком длинный (макс. 4000 символов). Сократите сообщение:")
+    if len(mailing_text) > MAILING_MAX_LENGTH:
+        await message.answer(f"❌ Текст слишком длинный (макс. {MAILING_MAX_LENGTH} символов). Сократите сообщение:")
         return
     
     await state.update_data(mailing_text=mailing_text)
@@ -1273,7 +1375,6 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("⛔ У вас нет прав")
         return
     
-    # Обработка подтверждения очистки
     if callback.data == "confirm_cleanup":
         deleted = Database.cleanup_old_tickets()
         await callback.message.edit_text(
@@ -1287,7 +1388,6 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
-    # Обработка рассылки
     if callback.data in ['mailing_send', 'mailing_cancel']:
         if callback.data == "mailing_cancel":
             await callback.message.edit_text("❌ Рассылка отменена")
@@ -1366,7 +1466,6 @@ async def process_callback(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     
-    # Обработка действий с заявками
     try:
         action, ticket_id = callback.data.split('_')
         ticket_id = int(ticket_id)
@@ -1467,6 +1566,25 @@ async def cmd_send(message: types.Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
+# ===== ОБРАБОТЧИК КОМАНДЫ /health =====
+@dp.message(Command("health"))
+async def cmd_health(message: types.Message):
+    """Проверка работоспособности бота"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        stats = Database.get_stats()
+        await message.answer(
+            f"✅ **Бот работает исправно**\n\n"
+            f"📊 Статистика:\n"
+            f"👥 Пользователей: {stats['total_users']}\n"
+            f"🎫 Заявок: {stats['new_tickets'] + stats['active_tickets'] + stats['resolved_tickets']}",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
 # ===== УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК =====
 @dp.message()
 async def handle_unknown(message: types.Message, state: FSMContext):
@@ -1483,15 +1601,13 @@ async def handle_unknown(message: types.Message, state: FSMContext):
         await start_registration(message, state)
         return
     
-    # Если состояние не установлено - показываем соответствующее меню
     if current_state is None:
         if user_id == ADMIN_ID:
             await show_admin_panel(message, state)
         else:
-            await show_main_menu(message, state, user[:2])  # Передаем только имя и место
+            await show_main_menu(message, state, (user[0], user[1]))
         return
     
-    # Подсказки для каждого состояния
     state_hints = {
         Form.name: "✏️ Введите ваше имя",
         Form.workplace: "📍 Выберите рабочее место из списка",
@@ -1526,14 +1642,12 @@ async def shutdown():
 async def main():
     print("="*60)
     print("🚀 БОТ ДЛЯ ВЫЗОВА СИСАДМИНА")
-    print("✅ Версия: ИДЕАЛЬНАЯ")
+    print("✅ Версия: ФИНАЛЬНАЯ")
     print(f"👤 Админ ID: {ADMIN_ID}")
     print(f"📁 База данных: {DB_PATH}")
-    print(f"📊 Рабочих мест: {len(VALID_WORKPLACES)}")
-    print(f"❓ Проблем: {len(VALID_PROBLEMS)}")
+    print(f"👥 Ожидаемое количество сотрудников: 60")
     print("="*60)
     
-    # Запускаем фоновые задачи
     asyncio.create_task(periodic_cleanup())
     
     try:
