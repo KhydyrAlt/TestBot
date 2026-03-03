@@ -1661,4 +1661,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n🛑 Бот остановлен")
     except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
+        print(f"❌ Критическая ошибка: {e}") 
